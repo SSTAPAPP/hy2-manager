@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 DB_SCHEMA_VERSION = 1
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
@@ -2228,7 +2228,7 @@ def user_data_checks(con):
         WHERE u.username IS NULL
         """
     ).fetchone()[0]
-    checks.append(("认证历史关联", orphan_events == 0, f"{orphan_events} 条已删除用户历史", True))
+    checks.append(("认证历史保留", True, f"{orphan_events} 条已删除用户历史", False))
     return checks
 
 
