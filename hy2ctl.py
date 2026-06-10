@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
 MAX_AUTH_BODY = 8192
@@ -989,8 +989,8 @@ def update_manager_script():
     tmp_dir = f"/tmp/hy2-manager-update.{os.getpid()}"
     run(f"rm -rf {tmp_dir}", check=False)
     try:
-        print("正在拉取 hy2-manager 最新脚本...")
-        run(f"git clone --depth 1 {REPO_URL} {tmp_dir}")
+        print("正在拉取 hy2-manager 最新脚本...", flush=True)
+        run(f"git clone --quiet --depth 1 {REPO_URL} {tmp_dir}")
         run(f"install -m 0755 {tmp_dir}/hy2ctl.py {APP_DIR}/hy2ctl.py")
         run(f"install -m 0755 {tmp_dir}/hy2.sh {APP_DIR}/hy2.sh")
         run(f"install -m 0755 {tmp_dir}/install.sh {APP_DIR}/install.sh")
