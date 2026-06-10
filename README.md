@@ -2,7 +2,7 @@
 
 轻量化 Hysteria2 多用户一键管理脚本，终端交互参考经典 SSR 数字菜单。
 
-当前版本：`v1.2.3`
+当前版本：`v1.2.4`
 
 ## 一键部署
 
@@ -77,7 +77,7 @@ HY2_NO_MENU=1 bash <(curl -fsSL https://raw.githubusercontent.com/SSTAPAPP/hy2-m
 - 启动、停止、重启服务
 - 查看服务状态和日志
 - 安装 / 启用 BBR
-- 可选启用服务端平滑限速（tc HTB + nftables）
+- 可选启用服务端平滑限速（实验，tc HTB + nftables）
 - 数据库备份与恢复
 - 健康检查
 
@@ -89,6 +89,9 @@ hy2 client-config 用户名     # 查看指定用户节点信息
 hy2 online                  # 查看在线连接和最近 IP
 hy2 auth-history            # 查看认证历史
 hy2 doctor                  # 健康检查
+hy2 update-manager          # 更新管理脚本并同步配置
+hy2 sync-config             # 重写 Hysteria2 配置和 systemd 单元
+hy2 repair-install          # 修复安装并运行健康检查
 hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 ```
 
@@ -105,7 +108,7 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 - 服务端固定监听 `443/udp`。
 - 没有自有域名时使用自签证书，客户端 URI 会启用 `insecure=1`，默认 SNI 为 `www.bing.com`。
 - 下载限速写入用户节点 URI 的 `downmbps` 参数，用于客户端侧平滑限速；不按设备数平均切分，避免多设备体验被切碎。
-- 可选启用服务端平滑限速：使用 `tc HTB` 做平滑队列，使用 `nftables` 根据认证记录中的客户端 IPv4/IPv6 + 端口标记回程 UDP 包，并映射到对应用户的下载限速 class。该能力默认关闭，适合需要服务端兜底控速的场景。
+- 可选启用服务端平滑限速（实验）：使用 `tc HTB` 做平滑队列，使用 `nftables` 根据认证记录中的客户端 IPv4/IPv6 + 端口标记回程 UDP 包，并映射到对应用户的下载限速 class。该能力默认关闭，适合需要服务端兜底控速的场景。
 - 上传固定为无限制，不提供新增或修改入口。
 - 服务端负责用户启用状态、设备数、总流量、到期时间、流量清零和在线统计。
 - 在线 IP 使用中文地理位置展示；国内显示省 / 市 / 区县和网络类型，海外统一显示未知。
@@ -119,10 +122,16 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 hy2 doctor
 ```
 
-健康检查会覆盖 root 权限、文件权限、systemd 状态、开机自启、UDP 443、认证后端、统计接口、SQLite 完整性、BBR/fq 和磁盘使用率。
+健康检查会覆盖 root 权限、文件权限、systemd 状态、开机自启、UDP 443、认证后端、统计接口、SQLite 完整性、旧配置残留、BBR/fq、实验流控状态和磁盘使用率。
 
 更新项目代码：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh)
+```
+
+只更新脚本并同步当前配置：
+
+```bash
+hy2 update-manager
 ```

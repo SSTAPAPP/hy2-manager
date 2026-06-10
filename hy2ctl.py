@@ -35,7 +35,8 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
+INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 MAX_AUTH_BODY = 8192
 DB_TIMEOUT = 10
 DB_WRITE_LOCK = threading.Lock()
@@ -894,13 +895,13 @@ def traffic_control_status():
 
 def traffic_control_menu():
     print()
-    print("服务端平滑限速")
+    print("服务端平滑限速（实验）")
     hr("-")
     print_kv_block([
         ["功能状态", "启用" if traffic_control_enabled() else "禁用"],
         ["出口网卡", traffic_control_iface() or "未识别"],
     ], label_width=10)
-    choice = render_menu("服务端平滑限速", [
+    choice = render_menu("服务端平滑限速（实验）", [
         ("1", "启用并应用规则"),
         ("2", "关闭并清理规则"),
         ("3", "立即刷新规则"),
@@ -908,6 +909,7 @@ def traffic_control_menu():
         ("5", "设置出口网卡"),
     ], "0-5", return_label="返回上级菜单")
     if choice == "1":
+        tip("实验功能依赖 tc/nftables 和默认出口网卡识别。启用前建议先运行健康检查。")
         set_setting("traffic_control_enabled", "1")
         apply_traffic_control()
     elif choice == "2":
@@ -944,6 +946,53 @@ def install():
     open_firewall()
     run("systemctl enable --now hy2-auth.service hysteria-server.service hy2-monitor.timer")
     print("安装完成。输入 hy2 打开管理菜单。")
+
+
+def sync_config(restart=True):
+    require_root()
+    require_systemd()
+    ensure_dirs()
+    init_db()
+    ensure_cert()
+    write_hysteria_config()
+    write_systemd_units()
+    open_firewall()
+    run("ln -sf /opt/hy2-manager/hy2.sh /usr/local/bin/hy2", check=False)
+    run("systemctl daemon-reload")
+    run("systemctl enable hy2-auth.service hysteria-server.service hy2-monitor.timer", check=False)
+    if restart:
+        run("systemctl restart hy2-auth.service hysteria-server.service", check=False)
+        run("systemctl restart hy2-monitor.timer", check=False)
+    refresh_traffic_control_if_enabled()
+    info("配置、systemd 单元和服务状态已同步。")
+
+
+def repair_installation():
+    require_root()
+    require_systemd()
+    ensure_dirs()
+    init_db()
+    if not os.path.exists(HYSTERIA_BIN):
+        if not shutil.which("curl"):
+            raise SystemExit("缺少 curl，无法修复安装 Hysteria2 内核。")
+        install_hysteria_binary()
+    sync_config(restart=True)
+    doctor()
+
+
+def update_manager_script():
+    require_root()
+    if not shutil.which("curl"):
+        raise SystemExit("缺少 curl，无法更新管理脚本。")
+    tmp = f"/tmp/hy2-manager-install.{os.getpid()}.sh"
+    run(f"curl -LfsS --retry 3 -o {tmp} {INSTALL_URL}")
+    run(f"chmod 755 {tmp}")
+    try:
+        run(f"HY2_SKIP_CORE_INSTALL=1 HY2_NO_MENU=1 sh {tmp}")
+    finally:
+        run(f"rm -f {tmp}", check=False)
+    run("/usr/local/bin/hy2 repair-install")
+    info("管理脚本已更新，并已同步当前安装配置。")
 
 
 def uninstall():
@@ -1955,6 +2004,14 @@ def doctor():
     check("UDP 443 监听", ":443" in sockets and "hysteria" in sockets, "应为 hysteria 监听 :443/udp")
     check("认证后端仅本地监听", "127.0.0.1:28787" in sockets, "127.0.0.1:28787")
     check("统计接口仅本地监听", "127.0.0.1:28788" in sockets, "127.0.0.1:28788")
+    config_text = ""
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            config_text = f.read()
+    except OSError:
+        pass
+    if config_text:
+        check("Hysteria 配置无旧混淆残留", "salamander" not in config_text and "obfs:" not in config_text)
     auth_ok = False
     try:
         req = urllib.request.Request(f"http://{AUTH_HOST}:{AUTH_PORT}/auth", data=b"{}", method="POST")
@@ -1969,11 +2026,22 @@ def doctor():
     bbr = run("sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc 2>/dev/null", check=False, capture=True)
     check("BBR/fq 已启用", "tcp_congestion_control = bbr" in bbr and "default_qdisc = fq" in bbr, "bbr/fq", warn=True)
     if traffic_control_enabled():
-        check("流控依赖 tc", shutil.which("tc") is not None, "tc")
-        check("流控依赖 nft", shutil.which("nft") is not None, "nft")
-        check("流控出口网卡", bool(traffic_control_iface()), traffic_control_iface() or "未识别")
+        tc_ok = shutil.which("tc") is not None
+        nft_ok = shutil.which("nft") is not None
+        iface = traffic_control_iface()
+        check("流控依赖 tc", tc_ok, "tc")
+        check("流控依赖 nft", nft_ok, "nft")
+        check("流控出口网卡", bool(iface), iface or "未识别")
+        if tc_ok and iface:
+            qdisc = run(f"tc qdisc show dev {shlex.quote(iface)} 2>/dev/null", check=False, capture=True)
+            check("流控 tc HTB 队列", "htb" in qdisc and "1:" in qdisc, qdisc or "未发现 htb root qdisc")
+        if nft_ok:
+            nft_table = run(f"nft list table inet {TC_TABLE} 2>/dev/null", check=False, capture=True)
+            check("流控 nft 规则表", TC_TABLE in nft_table and "chain output" in nft_table, TC_TABLE)
+        targets = traffic_control_targets()
+        check("流控在线限速规则", True, f"{len(targets)} 个用户目标")
     else:
-        check("服务端平滑限速", True, "未启用")
+        check("服务端平滑限速（实验）", True, "未启用")
     disk = run("df -P / | awk 'NR==2 {print $5}' | tr -d '%'", check=False, capture=True)
     check("磁盘使用率", disk.isdigit() and int(disk) < 90, f"已用 {disk}%", warn=True)
     with db() as con:
@@ -2170,6 +2238,40 @@ def settings_menu():
         print("请输入正确的数字 [0-3]")
 
 
+def maintenance_menu():
+    choice = render_menu("维护与修复", [
+        ("1", "更新管理脚本并同步配置"),
+        ("2", "仅同步 Hysteria2 配置"),
+        ("3", "修复安装并健康检查"),
+        ("4", "查看版本与路径"),
+    ], "0-4", return_label="返回上级菜单")
+    try:
+        if choice == "1":
+            update_manager_script()
+        elif choice == "2":
+            sync_config(restart=True)
+        elif choice == "3":
+            repair_installation()
+        elif choice == "4":
+            print_kv_block([
+                ["脚本版本", f"v{APP_VERSION}"],
+                ["项目目录", APP_DIR],
+                ["配置目录", ETC_DIR],
+                ["数据库", DB_PATH],
+                ["Hysteria 配置", CONFIG_PATH],
+                ["管理命令", "/usr/local/bin/hy2"],
+                ["安装脚本", INSTALL_URL],
+            ], label_width=14)
+        elif choice == "0":
+            print("已取消。")
+        else:
+            print("请输入正确的数字 [0-4]")
+    except KeyboardInterrupt:
+        print("\n已取消。")
+    except Exception as e:
+        print(f"错误: {e}")
+
+
 def user_menu():
     choice = render_menu("你要做什么？", [
         ("1", "添加 用户配置"),
@@ -2283,8 +2385,9 @@ def tools_menu():
         ("5", "系统设置"),
         ("6", "查看服务日志"),
         ("7", "清空认证历史"),
-        ("8", "服务端平滑限速"),
-    ], "0-8", return_label="返回上级菜单")
+        ("8", "维护与修复"),
+        ("9", "服务端平滑限速（实验）"),
+    ], "0-9", return_label="返回上级菜单")
     try:
         if choice == "1":
             install_bbr()
@@ -2301,11 +2404,13 @@ def tools_menu():
         elif choice == "7":
             clear_auth_history()
         elif choice == "8":
+            maintenance_menu()
+        elif choice == "9":
             traffic_control_menu()
         elif choice == "0":
             print("已取消。")
         else:
-            print("请输入正确的数字 [0-8]")
+            print("请输入正确的数字 [0-9]")
     except KeyboardInterrupt:
         print("\n已取消。")
     except Exception as e:
@@ -2380,7 +2485,11 @@ def main():
         "traffic-menu": traffic_menu,
         "service-menu": service_menu,
         "tools-menu": tools_menu,
+        "maintenance-menu": maintenance_menu,
         "install": install,
+        "sync-config": sync_config,
+        "repair-install": repair_installation,
+        "update-manager": update_manager_script,
         "update-core": update_hysteria_core,
         "add-user": add_user,
         "delete-user": delete_user,
