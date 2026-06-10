@@ -2,7 +2,7 @@
 
 轻量化 Hysteria2 多用户一键管理脚本，终端交互参考经典 SSR 数字菜单。
 
-当前版本：`v1.2.9`
+当前版本：`v1.3.0`
 
 ## 一键部署
 
@@ -77,7 +77,9 @@ HY2_NO_MENU=1 bash <(curl -fsSL https://raw.githubusercontent.com/SSTAPAPP/hy2-m
 - 启动、停止、重启服务
 - 查看服务状态和日志
 - 安装 / 启用 BBR
-- 可选启用服务端平滑限速（实验，tc HTB + nftables）
+- 维护与修复菜单支持更新脚本、同步配置、修复安装和查看版本路径
+- 高级 / 实验功能收纳服务日志、认证历史清理和服务端平滑限速
+- 可选启用服务端平滑限速（实验，tc HTB + nftables，默认关闭）
 - 数据库备份与恢复
 - 健康检查
 
@@ -92,6 +94,8 @@ hy2 doctor                  # 健康检查
 hy2 update-manager          # 更新管理脚本并同步配置
 hy2 sync-config             # 重写 Hysteria2 配置和 systemd 单元
 hy2 repair-install          # 修复安装并运行健康检查
+hy2 maintenance-menu        # 打开维护与修复菜单
+hy2 advanced-menu           # 打开高级 / 实验功能菜单
 hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 ```
 
@@ -136,4 +140,4 @@ bash <(curl -fsSL https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/in
 hy2 update-manager
 ```
 
-该命令只拉取项目文件并同步配置，不会重新安装系统依赖。
+该命令只拉取项目文件并同步配置，不会重新安装系统依赖；更新时会显示当前版本、远程版本和更新结果。

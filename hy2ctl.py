@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.9"
+APP_VERSION = "1.3.0"
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
 MAX_AUTH_BODY = 8192
@@ -197,6 +197,14 @@ def error(message):
 
 def tip(message):
     print(f"{c('[注意]', GREEN)} {message}")
+
+
+def step(message):
+    print(f"{c('[执行]', GREEN)} {message}")
+
+
+def done(message="完成。"):
+    print(f"{c('[完成]', GREEN)} {message}")
 
 
 def term_width():
@@ -850,12 +858,17 @@ def traffic_control_error_reason(exc):
     return lines[0] if lines else "未知错误"
 
 
-def apply_traffic_control(quiet=False):
-    require_root()
+def check_traffic_control_ready():
     require_traffic_control_tools()
     iface = traffic_control_iface()
     if not iface:
-        raise SystemExit("未能识别默认出口网卡，请在流控设置中手动指定。")
+        raise SystemExit("未能识别默认出口网卡，请先手动设置出口网卡。")
+    return iface
+
+
+def apply_traffic_control(quiet=False):
+    require_root()
+    iface = check_traffic_control_ready()
     targets = traffic_control_targets()
     qiface = shlex.quote(iface)
     run(f"tc qdisc replace dev {qiface} root handle 1: htb default {TC_DEFAULT_CLASS}", capture=True)
@@ -924,10 +937,12 @@ def traffic_control_menu():
         ("5", "设置出口网卡"),
     ], "0-5", return_label="返回上级菜单")
     if choice == "1":
-        tip("实验功能依赖 tc/nftables 和默认出口网卡识别。启用前建议先运行健康检查。")
-        set_setting("traffic_control_enabled", "1")
+        tip("实验功能依赖系统内核、tc/nftables 和出口网卡；兼容性检查通过后才会启用。")
         try:
+            check_traffic_control_ready()
             apply_traffic_control()
+            set_setting("traffic_control_enabled", "1")
+            done("服务端平滑限速已启用。")
         except (Exception, SystemExit) as e:
             set_setting("traffic_control_enabled", "0")
             clear_traffic_control(quiet=True)
@@ -978,6 +993,7 @@ def install():
 def sync_config(restart=True):
     require_root()
     require_systemd()
+    step("正在同步 Hysteria2 配置与 systemd 服务...")
     ensure_dirs()
     init_db()
     ensure_cert()
@@ -992,12 +1008,13 @@ def sync_config(restart=True):
         run("systemctl restart hy2-monitor.timer", check=False)
         wait_services_ready()
     refresh_traffic_control_if_enabled(notify=True)
-    info("配置、systemd 单元和服务状态已同步。")
+    done("配置、systemd 单元和服务状态已同步。")
 
 
 def repair_installation():
     require_root()
     require_systemd()
+    step("正在修复安装并执行健康检查...")
     ensure_dirs()
     init_db()
     if not os.path.exists(HYSTERIA_BIN):
@@ -1006,6 +1023,16 @@ def repair_installation():
         install_hysteria_binary()
     sync_config(restart=True)
     doctor()
+    done("修复与健康检查完成。")
+
+
+def manager_version_from_file(path):
+    try:
+        text = open(path, "r", encoding="utf-8").read()
+    except OSError:
+        return "未知"
+    match = re.search(r'^APP_VERSION\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.M)
+    return f"v{match.group(1)}" if match else "未知"
 
 
 def update_manager_script():
@@ -1019,6 +1046,7 @@ def update_manager_script():
     q_tmp = shlex.quote(tmp_dir)
     q_backup = shlex.quote(backup_dir)
     q_app = shlex.quote(APP_DIR)
+    update_result = "未知"
 
     def validate_update_tree(path):
         q_path = shlex.quote(path)
@@ -1038,14 +1066,23 @@ def update_manager_script():
 
     run(f"rm -rf {q_tmp} {q_backup}", check=False)
     try:
-        print("正在拉取 hy2-manager 最新脚本...", flush=True)
+        current_version = f"v{APP_VERSION}"
+        print_kv_block([["当前版本", current_version]], label_width=10)
+        step("正在拉取 hy2-manager 最新脚本...")
         run(f"git clone --quiet --depth 1 {shlex.quote(REPO_URL)} {q_tmp}")
+        remote_version = manager_version_from_file(os.path.join(tmp_dir, "hy2ctl.py"))
+        print_kv_block([["远程版本", remote_version]], label_width=10)
+        if remote_version == current_version:
+            update_result = "已是最新"
+            tip("当前已是最新管理脚本，仍会同步配置以确保安装状态一致。")
+        else:
+            update_result = f"{current_version} -> {remote_version}"
         run(f"mkdir -p {q_backup}")
         run(f"cp -a {q_app}/. {q_backup}/")
-        print(f"已备份当前脚本：{backup_dir}", flush=True)
+        print_kv_block([["临时备份", backup_dir]], label_width=10)
 
         validate_update_tree(tmp_dir)
-        print("新脚本语法检查通过。", flush=True)
+        done("新脚本语法检查通过。")
 
         run(f"install -m 0755 {q_tmp}/hy2ctl.py {q_app}/hy2ctl.py")
         run(f"install -m 0755 {q_tmp}/hy2.sh {q_app}/hy2.sh")
@@ -1061,7 +1098,8 @@ def update_manager_script():
     finally:
         run(f"rm -rf {q_tmp}", check=False)
     run(f"rm -rf {q_backup}", check=False)
-    info("管理脚本已更新，并已同步当前安装配置，临时备份已删除。建议运行 hy2 doctor 复查。")
+    print_kv_block([["更新结果", update_result]], label_width=10)
+    done("管理脚本已更新，配置已同步，临时备份已删除。")
 
 
 def uninstall():
@@ -2369,6 +2407,8 @@ def maintenance_menu():
             print("请输入正确的数字 [0-4]")
     except KeyboardInterrupt:
         print("\n已取消。")
+    except SystemExit as e:
+        print(e)
     except Exception as e:
         print(f"错误: {e}")
 
@@ -2477,6 +2517,29 @@ def service_menu():
         print(f"错误: {e}")
 
 
+def advanced_menu():
+    choice = render_menu("高级 / 实验功能", [
+        ("1", "查看服务日志"),
+        ("2", "清空认证历史"),
+        ("3", "服务端平滑限速（实验）"),
+    ], "0-3", return_label="返回上级菜单")
+    try:
+        if choice == "1":
+            show_logs()
+        elif choice == "2":
+            clear_auth_history()
+        elif choice == "3":
+            traffic_control_menu()
+        elif choice == "0":
+            print("已取消。")
+        else:
+            print("请输入正确的数字 [0-3]")
+    except KeyboardInterrupt:
+        print("\n已取消。")
+    except Exception as e:
+        print(f"错误: {e}")
+
+
 def tools_menu():
     choice = render_menu("系统工具", [
         ("1", "安装 / 启用 BBR"),
@@ -2484,11 +2547,9 @@ def tools_menu():
         ("3", "查看备份列表"),
         ("4", "恢复数据库备份"),
         ("5", "系统设置"),
-        ("6", "查看服务日志"),
-        ("7", "清空认证历史"),
-        ("8", "维护与修复"),
-        ("9", "服务端平滑限速（实验）"),
-    ], "0-9", return_label="返回上级菜单")
+        ("6", "维护与修复"),
+        ("7", "高级 / 实验功能"),
+    ], "0-7", return_label="返回上级菜单")
     try:
         if choice == "1":
             install_bbr()
@@ -2501,17 +2562,13 @@ def tools_menu():
         elif choice == "5":
             settings_menu()
         elif choice == "6":
-            show_logs()
-        elif choice == "7":
-            clear_auth_history()
-        elif choice == "8":
             maintenance_menu()
-        elif choice == "9":
-            traffic_control_menu()
+        elif choice == "7":
+            advanced_menu()
         elif choice == "0":
             print("已取消。")
         else:
-            print("请输入正确的数字 [0-9]")
+            print("请输入正确的数字 [0-7]")
     except KeyboardInterrupt:
         print("\n已取消。")
     except Exception as e:
@@ -2587,6 +2644,7 @@ def main():
         "service-menu": service_menu,
         "tools-menu": tools_menu,
         "maintenance-menu": maintenance_menu,
+        "advanced-menu": advanced_menu,
         "install": install,
         "sync-config": sync_config,
         "repair-install": repair_installation,
