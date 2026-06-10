@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.9"
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
 MAX_AUTH_BODY = 8192
@@ -836,8 +836,8 @@ def nft_script_for_targets(targets):
 def clear_traffic_control(quiet=False):
     iface = traffic_control_iface()
     if iface:
-        run(f"tc qdisc del dev {shlex.quote(iface)} root", check=False)
-    run(f"nft delete table inet {TC_TABLE}", check=False)
+        run(f"tc qdisc del dev {shlex.quote(iface)} root", check=False, capture=True)
+    run(f"nft delete table inet {TC_TABLE}", check=False, capture=True)
     if not quiet:
         info("服务端平滑限速规则已清理。")
 
@@ -858,20 +858,21 @@ def apply_traffic_control(quiet=False):
         raise SystemExit("未能识别默认出口网卡，请在流控设置中手动指定。")
     targets = traffic_control_targets()
     qiface = shlex.quote(iface)
-    run(f"tc qdisc replace dev {qiface} root handle 1: htb default {TC_DEFAULT_CLASS}")
+    run(f"tc qdisc replace dev {qiface} root handle 1: htb default {TC_DEFAULT_CLASS}", capture=True)
     run(
         f"tc class replace dev {qiface} parent 1: classid 1:{TC_DEFAULT_CLASS} "
         "htb rate 10000mbit ceil 10000mbit",
         check=False,
+        capture=True,
     )
     for prio, target in enumerate(targets, 1):
         rate = f"{target['rate_mbit']:.3f}mbit"
         classid = target["classid"]
         mark = target["mark"]
-        run(f"tc class replace dev {qiface} parent 1: classid 1:{classid} htb rate {rate} ceil {rate}")
-        run(f"tc filter replace dev {qiface} parent 1: protocol ip prio {prio} handle {mark} fw flowid 1:{classid}")
-        run(f"tc filter replace dev {qiface} parent 1: protocol ipv6 prio {prio} handle {mark} fw flowid 1:{classid}", check=False)
-    run(f"nft delete table inet {TC_TABLE}", check=False)
+        run(f"tc class replace dev {qiface} parent 1: classid 1:{classid} htb rate {rate} ceil {rate}", capture=True)
+        run(f"tc filter replace dev {qiface} parent 1: protocol ip prio {prio} handle {mark} fw flowid 1:{classid}", capture=True)
+        run(f"tc filter replace dev {qiface} parent 1: protocol ipv6 prio {prio} handle {mark} fw flowid 1:{classid}", check=False, capture=True)
+    run(f"nft delete table inet {TC_TABLE}", check=False, capture=True)
     run_input(["nft", "-f", "-"], nft_script_for_targets(targets))
     if not quiet:
         info(f"服务端平滑限速已应用，网卡: {iface}，用户规则: {len(targets)}。")
