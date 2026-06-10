@@ -2652,8 +2652,8 @@ def self_test():
             print(f"[{c('失败', RED)}] {name}" + (f" - {detail}" if detail else ""))
 
     try:
-        import py_compile
-        py_compile.compile(__file__, cfile=os.devnull, doraise=True)
+        with open(__file__, "r", encoding="utf-8") as f:
+            compile(f.read(), __file__, "exec")
         check("Python 语法", True, __file__)
     except Exception as e:
         check("Python 语法", False, str(e))
