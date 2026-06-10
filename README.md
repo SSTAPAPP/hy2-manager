@@ -2,7 +2,7 @@
 
 轻量化 Hysteria2 多用户一键管理脚本，终端交互参考经典 SSR 数字菜单。
 
-当前版本：`v1.2.4`
+当前版本：`v1.2.5`
 
 ## 一键部署
 
@@ -135,3 +135,5 @@ bash <(curl -fsSL https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/in
 ```bash
 hy2 update-manager
 ```
+
+该命令只拉取项目文件并同步配置，不会重新安装系统依赖。

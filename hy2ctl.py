@@ -35,8 +35,9 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
+REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
 MAX_AUTH_BODY = 8192
 DB_TIMEOUT = 10
 DB_WRITE_LOCK = threading.Lock()
@@ -963,6 +964,7 @@ def sync_config(restart=True):
     if restart:
         run("systemctl restart hy2-auth.service hysteria-server.service", check=False)
         run("systemctl restart hy2-monitor.timer", check=False)
+        wait_services_ready()
     refresh_traffic_control_if_enabled()
     info("配置、systemd 单元和服务状态已同步。")
 
@@ -982,17 +984,22 @@ def repair_installation():
 
 def update_manager_script():
     require_root()
-    if not shutil.which("curl"):
-        raise SystemExit("缺少 curl，无法更新管理脚本。")
-    tmp = f"/tmp/hy2-manager-install.{os.getpid()}.sh"
-    run(f"curl -LfsS --retry 3 -o {tmp} {INSTALL_URL}")
-    run(f"chmod 755 {tmp}")
+    if not shutil.which("git"):
+        raise SystemExit("缺少 git，无法更新管理脚本。")
+    tmp_dir = f"/tmp/hy2-manager-update.{os.getpid()}"
+    run(f"rm -rf {tmp_dir}", check=False)
     try:
-        run(f"HY2_SKIP_CORE_INSTALL=1 HY2_NO_MENU=1 sh {tmp}")
+        print("正在拉取 hy2-manager 最新脚本...")
+        run(f"git clone --depth 1 {REPO_URL} {tmp_dir}")
+        run(f"install -m 0755 {tmp_dir}/hy2ctl.py {APP_DIR}/hy2ctl.py")
+        run(f"install -m 0755 {tmp_dir}/hy2.sh {APP_DIR}/hy2.sh")
+        run(f"install -m 0755 {tmp_dir}/install.sh {APP_DIR}/install.sh")
+        run(f"install -m 0644 {tmp_dir}/README.md {APP_DIR}/README.md")
+        run("ln -sf /opt/hy2-manager/hy2.sh /usr/local/bin/hy2", check=False)
     finally:
-        run(f"rm -f {tmp}", check=False)
-    run("/usr/local/bin/hy2 repair-install")
-    info("管理脚本已更新，并已同步当前安装配置。")
+        run(f"rm -rf {tmp_dir}", check=False)
+    run("/usr/local/bin/hy2 sync-config")
+    info("管理脚本已更新，并已同步当前安装配置。建议运行 hy2 doctor 复查。")
 
 
 def uninstall():
@@ -1579,6 +1586,38 @@ def stats_request(path, method="GET", body=None):
 
 def stats_get(path):
     return stats_request(path)
+
+
+def auth_backend_ready(timeout=15):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            req = urllib.request.Request(f"http://{AUTH_HOST}:{AUTH_PORT}/auth", data=b"{}", method="POST")
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=2) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            time.sleep(0.5)
+    return False
+
+
+def stats_backend_ready(timeout=15):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if stats_get("/online") is not None:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def wait_services_ready(timeout=20):
+    auth_ok = auth_backend_ready(timeout)
+    stats_ok = stats_backend_ready(timeout)
+    if not auth_ok:
+        raise SystemExit("认证后端启动超时，请查看 hy2-auth.service 日志。")
+    if not stats_ok:
+        raise SystemExit("统计接口启动超时，请查看 hysteria-server.service 日志。")
 
 
 def kick_users(users):
