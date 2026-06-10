@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 DB_SCHEMA_VERSION = 1
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
@@ -85,8 +85,9 @@ def now_iso():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
-def log(message):
-    line = f"{now_iso()} {message}\n"
+def log(message, level="INFO"):
+    level = str(level or "INFO").upper()
+    line = f"{now_iso()} [{level}] {message}\n"
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line)
@@ -283,7 +284,7 @@ def handle_menu_error(exc, main=False):
     if isinstance(exc, SystemExit):
         print(exc)
         return "continue"
-    log(f"menu action failed: {type(exc).__name__}: {exc}")
+    log(f"menu action failed: {type(exc).__name__}: {exc}", "ERROR")
     print(f"错误: {exc}")
     return "continue"
 
@@ -370,6 +371,35 @@ def require_root():
 def require_systemd():
     if not shutil.which("systemctl") or not os.path.isdir("/run/systemd/system"):
         raise SystemExit("当前系统未运行 systemd，暂不支持一键安装系统服务。")
+
+
+def install_preflight():
+    failures = 0
+
+    def check(name, ok, detail="", warn=False):
+        nonlocal failures
+        if ok:
+            print(f"[{c('通过', GREEN)}] {name}" + (f" - {detail}" if detail else ""))
+        elif warn:
+            print(f"[{c('警告', GREEN)}] {name}" + (f" - {detail}" if detail else ""))
+        else:
+            failures += 1
+            print(f"[{c('失败', RED)}] {name}" + (f" - {detail}" if detail else ""))
+
+    check("root 权限", os.geteuid() == 0)
+    check("systemd 环境", shutil.which("systemctl") is not None and os.path.isdir("/run/systemd/system"))
+    for tool in ("python3", "curl", "openssl", "ip", "ss"):
+        check(f"依赖命令 {tool}", shutil.which(tool) is not None, shutil.which(tool) or "未找到")
+    if shutil.which("ss"):
+        udp443 = run("ss -H -lunp 'sport = :443' 2>/dev/null", check=False, capture=True)
+        occupied_by_other = bool(udp443.strip()) and "hysteria" not in udp443 and "users:((" in udp443
+        check("UDP 443 端口", not occupied_by_other, udp443.strip() or "未占用")
+    else:
+        check("UDP 443 端口", True, "缺少 ss，已跳过", warn=True)
+    fw_tool = shutil.which("ufw") or shutil.which("firewall-cmd") or shutil.which("iptables") or shutil.which("nft")
+    check("防火墙工具", True, fw_tool or "未检测到，安装仍可继续", warn=not bool(fw_tool))
+    if failures:
+        raise SystemExit(f"安装预检查失败：{failures} 项未通过。")
 
 
 def ensure_dirs():
@@ -942,7 +972,7 @@ def refresh_traffic_control_if_enabled(notify=False):
     try:
         apply_traffic_control(quiet=True)
     except (Exception, SystemExit) as e:
-        log(f"traffic control refresh failed: {type(e).__name__}: {e}")
+        log(f"traffic control refresh failed: {type(e).__name__}: {e}", "TRAFFIC")
         set_setting("traffic_control_enabled", "0")
         clear_traffic_control(quiet=True)
         if notify:
@@ -1034,6 +1064,7 @@ def traffic_control_menu():
 def install():
     require_root()
     require_systemd()
+    install_preflight()
     ensure_dirs()
     init_db()
     if not shutil.which("curl"):
@@ -1111,6 +1142,7 @@ def update_manager_script():
         run(f"sh -n {q_path}/install.sh")
         if shutil.which("bash"):
             run(f"bash -n {q_path}/hy2.sh")
+        run(f"HY2_SELF_TEST_READONLY=1 python3 {q_path}/hy2ctl.py self-test", capture=True)
 
     def restore_backup():
         print("更新失败，正在回滚旧版本...", flush=True)
@@ -1139,7 +1171,7 @@ def update_manager_script():
         print_kv_block([["临时备份", backup_dir]], label_width=10)
 
         validate_update_tree(tmp_dir)
-        done("新脚本语法检查通过。")
+        done("新脚本语法检查和自检通过。")
 
         run(f"install -m 0755 {q_tmp}/hy2ctl.py {q_app}/hy2ctl.py")
         run(f"install -m 0755 {q_tmp}/hy2.sh {q_app}/hy2.sh")
@@ -1161,8 +1193,19 @@ def update_manager_script():
 
 def uninstall():
     require_root()
-    confirm = input("确认卸载 Hysteria2、hy2-manager，并删除配置、服务和数据库？[y/N]: ").strip().lower()
-    if confirm != "y":
+    print()
+    print("即将卸载并删除以下内容：")
+    print_kv_block([
+        ["项目目录", APP_DIR],
+        ["配置目录", ETC_DIR],
+        ["Hysteria 配置", HYSTERIA_DIR],
+        ["管理命令", "/usr/local/bin/hy2"],
+        ["Hysteria 内核", HYSTERIA_BIN],
+        ["systemd 服务", "hysteria-server / hy2-auth / hy2-monitor"],
+    ], label_width=14)
+    tip("已安装的 BBR/fq 系统优化配置会保留。")
+    confirm = input("确认卸载请输入 YES\n(默认: 取消): ").strip()
+    if confirm != "YES":
         print("已取消。")
         return
     run("systemctl disable --now hysteria-server.service hy2-auth.service hy2-monitor.timer hy2-monitor.service", check=False)
@@ -1737,7 +1780,7 @@ def stats_request(path, method="GET", body=None):
             raw = r.read().decode()
         return json.loads(raw) if raw else {}
     except Exception as e:
-        log(f"stats error {path}: {e}")
+        log(f"stats error {path}: {e}", "WARN")
         return None
 
 
@@ -1808,7 +1851,7 @@ def record_auth_event(username, addr, ok, reason, tx=0):
                         (ip, now_iso(), now_iso(), username),
                     )
     except Exception as e:
-        log(f"record_auth_event failed: {e}")
+        log(f"record_auth_event failed: {e}", "ERROR")
 
 
 def reserve_auth_device(username, ip, max_devices, window_seconds=DEVICE_AUTH_WINDOW_SECONDS):
@@ -1881,15 +1924,15 @@ def monitor():
             if limit and current_used >= limit and r["enabled"]:
                 con.execute("UPDATE users SET enabled=0,updated_at=? WHERE username=?", (now_iso(), username))
                 to_kick.append(username)
-                log(f"disabled {username}: traffic quota exceeded")
+                log(f"disabled {username}: traffic quota exceeded", "TRAFFIC")
             if r["enabled"] and is_expired_value(r["expire_at"], now):
                 con.execute("UPDATE users SET enabled=0,updated_at=? WHERE username=?", (now_iso(), username))
                 to_kick.append(username)
-                log(f"disabled {username}: expired")
+                log(f"disabled {username}: expired", "TRAFFIC")
             max_devices = int(r["max_devices"])
             if max_devices and int(online.get(username, 0)) > max_devices:
                 to_kick.append(username)
-                log(f"kicked {username}: device limit exceeded")
+                log(f"kicked {username}: device limit exceeded", "TRAFFIC")
         con.execute(
             "DELETE FROM auth_events WHERE id NOT IN "
             "(SELECT id FROM auth_events ORDER BY id DESC LIMIT 10000)"
@@ -1905,7 +1948,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         try:
             self.handle_auth_post()
         except Exception as e:
-            log(f"auth handler error: {type(e).__name__}: {e}")
+            log(f"auth handler error: {type(e).__name__}: {e}", "ERROR")
             try:
                 self.reply({"ok": False, "msg": "server error"})
             except Exception:
@@ -1965,7 +2008,7 @@ class AuthHandler(http.server.BaseHTTPRequestHandler):
         self.reply({"ok": True, "id": username})
 
     def log_message(self, fmt, *args):
-        log("auth " + fmt % args)
+        log(fmt % args, "AUTH")
 
     def reply(self, data):
         raw = json.dumps(data).encode()
@@ -1985,7 +2028,7 @@ class AuthHTTPServer(http.server.ThreadingHTTPServer):
 def auth_server():
     init_db()
     server = AuthHTTPServer((AUTH_HOST, AUTH_PORT), AuthHandler)
-    log(f"auth server listening on {AUTH_HOST}:{AUTH_PORT}")
+    log(f"auth server listening on {AUTH_HOST}:{AUTH_PORT}", "INFO")
     server.serve_forever()
 
 
@@ -2149,6 +2192,46 @@ def status():
     print_table(["项目", "状态"], rows)
 
 
+def user_data_checks(con):
+    today = dt.date.today().isoformat()
+    checks = []
+    empty_users = con.execute("SELECT count(*) FROM users WHERE username='' OR password=''").fetchone()[0]
+    checks.append(("用户基础字段", empty_users == 0, f"{empty_users} 条空用户名/密码", False))
+    negative_users = con.execute(
+        """
+        SELECT count(*) FROM users
+        WHERE max_devices<0 OR speed_down_bps<0 OR speed_up_bps<0
+           OR traffic_limit_bytes<0 OR traffic_used_bytes<0
+        """
+    ).fetchone()[0]
+    checks.append(("用户数值字段", negative_users == 0, f"{negative_users} 条负数记录", False))
+    invalid_cycles = con.execute(
+        "SELECT count(*) FROM users WHERE reset_cycle NOT IN ('none','daily','weekly','monthly')"
+    ).fetchone()[0]
+    checks.append(("流量清零周期", invalid_cycles == 0, f"{invalid_cycles} 条非法周期", False))
+    expired_enabled = con.execute(
+        "SELECT count(*) FROM users WHERE enabled=1 AND expire_at!='' AND expire_at<?",
+        (today,),
+    ).fetchone()[0]
+    checks.append(("过期用户启用状态", expired_enabled == 0, f"{expired_enabled} 个过期用户仍启用", True))
+    over_quota = con.execute(
+        """
+        SELECT count(*) FROM users
+        WHERE enabled=1 AND traffic_limit_bytes>0 AND traffic_used_bytes>=traffic_limit_bytes
+        """
+    ).fetchone()[0]
+    checks.append(("超流量用户启用状态", over_quota == 0, f"{over_quota} 个超流量用户仍启用", True))
+    orphan_events = con.execute(
+        """
+        SELECT count(*) FROM auth_events e
+        LEFT JOIN users u ON u.username=e.username
+        WHERE u.username IS NULL
+        """
+    ).fetchone()[0]
+    checks.append(("认证历史关联", orphan_events == 0, f"{orphan_events} 条已删除用户历史", True))
+    return checks
+
+
 def doctor():
     init_db()
     failures = 0
@@ -2239,6 +2322,9 @@ def doctor():
     else:
         check("服务端平滑限速（实验）", True, "未启用")
     check("数据库 schema 版本", setting("schema_version", "0") == str(DB_SCHEMA_VERSION), f"v{setting('schema_version', '0')}")
+    with db() as con:
+        for name, ok, detail, warn in user_data_checks(con):
+            check(name, ok, detail, warn=warn)
     disk = run("df -P / | awk 'NR==2 {print $5}' | tr -d '%'", check=False, capture=True)
     check("磁盘使用率", disk.isdigit() and int(disk) < 90, f"已用 {disk}%", warn=True)
     with db() as con:
@@ -2642,6 +2728,7 @@ def menu():
 
 def self_test():
     failures = 0
+    readonly = os.environ.get("HY2_SELF_TEST_READONLY") == "1"
 
     def check(name, ok, detail=""):
         nonlocal failures
@@ -2659,29 +2746,45 @@ def self_test():
         check("Python 语法", False, str(e))
 
     try:
-        init_db()
-        with db() as con:
+        if readonly:
+            if not os.path.exists(DB_PATH):
+                raise FileNotFoundError(DB_PATH)
+            con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=DB_TIMEOUT)
+            con.row_factory = sqlite3.Row
+        else:
+            init_db()
+            con = db()
+        with con:
             integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             tables = {row["name"] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             user_cols = {row["name"] for row in con.execute("PRAGMA table_info(users)").fetchall()}
+            schema_row = con.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
+            schema_version = schema_row["value"] if schema_row else "0"
+            data_checks = user_data_checks(con)
         required_tables = {"settings", "users", "auth_events"}
         required_user_cols = {"username", "password", "enabled", "max_devices", "speed_down_bps", "traffic_limit_bytes", "traffic_used_bytes", "reset_cycle", "expire_at"}
         check("SQLite 数据库完整性", integrity == "ok", integrity)
         check("数据库表结构", required_tables.issubset(tables), ", ".join(sorted(tables)))
         check("用户字段结构", required_user_cols.issubset(user_cols), f"{len(user_cols)} 个字段")
-        check("数据库 schema 版本", setting("schema_version", "0") == str(DB_SCHEMA_VERSION), f"v{setting('schema_version', '0')}")
+        check("数据库 schema 版本", schema_version == str(DB_SCHEMA_VERSION), f"v{schema_version}")
+        for name, ok, detail, warn in data_checks:
+            check(name, ok or warn, detail)
     except Exception as e:
-        check("数据库自检", False, str(e))
+        check("数据库自检", False if not readonly else True, f"{e}" if not readonly else f"只读跳过: {e}")
 
     commands = command_registry()
     required_commands = {
         "menu", "user-menu", "tools-menu", "maintenance-menu", "advanced-menu",
-        "install", "sync-config", "repair-install", "update-manager",
+        "install", "preflight", "sync-config", "repair-install", "update-manager",
         "doctor", "self-test", "auth-server", "monitor",
     }
     check("命令入口表", required_commands.issubset(commands.keys()), f"{len(commands)} 个命令")
     check("命令入口可调用", all(callable(func) for func in commands.values()))
     check("项目目录路径", bool(APP_DIR and ETC_DIR and DB_PATH), f"{APP_DIR} / {ETC_DIR}")
+    check("安装环境 root", os.geteuid() == 0)
+    check("安装环境 systemd", shutil.which("systemctl") is not None and os.path.isdir("/run/systemd/system"))
+    for tool in ("python3", "curl", "openssl", "ip", "ss"):
+        check(f"安装依赖 {tool}", shutil.which(tool) is not None, shutil.which(tool) or "未找到")
 
     if os.path.exists(ETC_DIR):
         mode = oct(os.stat(ETC_DIR).st_mode & 0o777)
@@ -2709,6 +2812,7 @@ def command_registry():
         "maintenance-menu": maintenance_menu,
         "advanced-menu": advanced_menu,
         "install": install,
+        "preflight": install_preflight,
         "sync-config": sync_config,
         "repair-install": repair_installation,
         "update-manager": update_manager_script,

@@ -2,7 +2,7 @@
 
 轻量化 Hysteria2 多用户一键管理脚本，终端交互参考经典 SSR 数字菜单。
 
-当前版本：`v1.4.0`
+当前版本：`v1.4.1`
 
 ## 一键部署
 
@@ -92,6 +92,7 @@ hy2 online                  # 查看在线连接和最近 IP
 hy2 auth-history            # 查看认证历史
 hy2 doctor                  # 健康检查
 hy2 self-test               # 脚本自检，不修改用户配置
+hy2 preflight               # 安装环境预检查
 hy2 update-manager          # 更新管理脚本并同步配置
 hy2 sync-config             # 重写 Hysteria2 配置和 systemd 单元
 hy2 repair-install          # 修复安装并运行健康检查
@@ -119,8 +120,9 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 - 服务端负责用户启用状态、设备数、总流量、到期时间、流量清零和在线统计。
 - 在线 IP 使用中文地理位置展示；国内显示省 / 市 / 区县和网络类型，海外统一显示未知。
 - 终端输出统一高亮用户名、IP、端口、状态、限速、流量、URI、服务状态和版本号等关键信息。
+- 日志按 `[INFO]`、`[WARN]`、`[ERROR]`、`[AUTH]`、`[TRAFFIC]` 分级，方便排查认证、流量和运行错误。
 - systemd 单元启用开机自启，并使用 `NoNewPrivileges`、`PrivateTmp`、`ProtectHome`、`ProtectControlGroups`、`ProtectKernelModules` 和 `RestrictSUIDSGID` 做轻量加固。
-- 菜单 `3. 卸载 Hysteria2` 会删除 Hysteria2 内核、本项目目录、配置、数据库、systemd 服务和 `hy2` 命令；已安装的 BBR/fq 系统优化配置会保留。
+- 菜单 `3. 卸载 Hysteria2` 会删除 Hysteria2 内核、本项目目录、配置、数据库、systemd 服务和 `hy2` 命令；卸载前会列出删除路径并要求输入 `YES` 确认，已安装的 BBR/fq 系统优化配置会保留。
 
 ## 维护
 
@@ -128,7 +130,7 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 hy2 doctor
 ```
 
-健康检查会覆盖 root 权限、文件权限、systemd 状态、开机自启、UDP 443、认证后端、统计接口、SQLite 完整性、数据库 schema 版本、旧配置残留、BBR/fq、实验流控状态和磁盘使用率。
+健康检查会覆盖 root 权限、文件权限、systemd 状态、开机自启、UDP 443、认证后端、统计接口、SQLite 完整性、数据库 schema 版本、用户数据一致性、旧配置残留、BBR/fq、实验流控状态和磁盘使用率。
 
 脚本自检：
 
@@ -136,7 +138,15 @@ hy2 doctor
 hy2 self-test
 ```
 
-自检用于检查 Python 语法、数据库结构、schema 版本、命令入口表和关键权限，适合更新前后快速确认脚本自身是否完整。
+自检用于检查 Python 语法、数据库结构、schema 版本、用户数据一致性、命令入口表、安装依赖和关键权限，适合更新前后快速确认脚本自身是否完整。`hy2 update-manager` 会在覆盖旧脚本前对新脚本执行只读自检，失败会自动回滚。
+
+安装环境预检查：
+
+```bash
+hy2 preflight
+```
+
+预检查会确认 root、systemd、关键依赖命令、UDP 443 占用和防火墙工具，避免进入半安装状态。
 
 更新项目代码：
 
