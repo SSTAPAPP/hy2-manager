@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.6"
+APP_VERSION = "1.2.7"
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
 MAX_AUTH_BODY = 8192
@@ -986,20 +986,56 @@ def update_manager_script():
     require_root()
     if not shutil.which("git"):
         raise SystemExit("缺少 git，无法更新管理脚本。")
+    if not os.path.isdir(APP_DIR):
+        raise SystemExit(f"项目目录不存在：{APP_DIR}")
     tmp_dir = f"/tmp/hy2-manager-update.{os.getpid()}"
-    run(f"rm -rf {tmp_dir}", check=False)
+    backup_dir = f"/tmp/hy2-manager-backup.{os.getpid()}"
+    q_tmp = shlex.quote(tmp_dir)
+    q_backup = shlex.quote(backup_dir)
+    q_app = shlex.quote(APP_DIR)
+
+    def validate_update_tree(path):
+        q_path = shlex.quote(path)
+        run(f"python3 -m py_compile {q_path}/hy2ctl.py")
+        run(f"sh -n {q_path}/install.sh")
+        if shutil.which("bash"):
+            run(f"bash -n {q_path}/hy2.sh")
+
+    def restore_backup():
+        print("更新失败，正在回滚旧版本...", flush=True)
+        run(f"rm -rf {q_app}", check=False)
+        run(f"mkdir -p {q_app}")
+        run(f"cp -a {q_backup}/. {q_app}/")
+        run("ln -sf /opt/hy2-manager/hy2.sh /usr/local/bin/hy2", check=False)
+        run("/usr/local/bin/hy2 sync-config", check=False)
+        print("已回滚到更新前版本。", flush=True)
+
+    run(f"rm -rf {q_tmp} {q_backup}", check=False)
     try:
         print("正在拉取 hy2-manager 最新脚本...", flush=True)
-        run(f"git clone --quiet --depth 1 {REPO_URL} {tmp_dir}")
-        run(f"install -m 0755 {tmp_dir}/hy2ctl.py {APP_DIR}/hy2ctl.py")
-        run(f"install -m 0755 {tmp_dir}/hy2.sh {APP_DIR}/hy2.sh")
-        run(f"install -m 0755 {tmp_dir}/install.sh {APP_DIR}/install.sh")
-        run(f"install -m 0644 {tmp_dir}/README.md {APP_DIR}/README.md")
+        run(f"git clone --quiet --depth 1 {shlex.quote(REPO_URL)} {q_tmp}")
+        run(f"mkdir -p {q_backup}")
+        run(f"cp -a {q_app}/. {q_backup}/")
+        print(f"已备份当前脚本：{backup_dir}", flush=True)
+
+        validate_update_tree(tmp_dir)
+        print("新脚本语法检查通过。", flush=True)
+
+        run(f"install -m 0755 {q_tmp}/hy2ctl.py {q_app}/hy2ctl.py")
+        run(f"install -m 0755 {q_tmp}/hy2.sh {q_app}/hy2.sh")
+        run(f"install -m 0755 {q_tmp}/install.sh {q_app}/install.sh")
+        run(f"install -m 0644 {q_tmp}/README.md {q_app}/README.md")
         run("ln -sf /opt/hy2-manager/hy2.sh /usr/local/bin/hy2", check=False)
+        run("/usr/local/bin/hy2 sync-config")
+    except BaseException:
+        if os.path.isdir(backup_dir):
+            restore_backup()
+            run(f"rm -rf {q_backup}", check=False)
+        raise
     finally:
-        run(f"rm -rf {tmp_dir}", check=False)
-    run("/usr/local/bin/hy2 sync-config")
-    info("管理脚本已更新，并已同步当前安装配置。建议运行 hy2 doctor 复查。")
+        run(f"rm -rf {q_tmp}", check=False)
+    run(f"rm -rf {q_backup}", check=False)
+    info("管理脚本已更新，并已同步当前安装配置，临时备份已删除。建议运行 hy2 doctor 复查。")
 
 
 def uninstall():
