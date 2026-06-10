@@ -2,7 +2,7 @@
 
 轻量化 Hysteria2 多用户一键管理脚本，终端交互参考经典 SSR 数字菜单。
 
-当前版本：`v1.1.15`
+当前版本：`v1.1.16`
 
 ## 一键部署
 
@@ -102,6 +102,7 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 - 在线 IP 使用中文地理位置展示；国内显示省 / 市 / 区县和网络类型，海外统一显示未知。
 - 终端输出统一高亮用户名、IP、端口、状态、限速、流量、URI、服务状态和版本号等关键信息。
 - systemd 单元启用开机自启，并使用 `NoNewPrivileges`、`PrivateTmp`、`ProtectHome`、`ProtectControlGroups`、`ProtectKernelModules` 和 `RestrictSUIDSGID` 做轻量加固。
+- 菜单 `3. 卸载 Hysteria2` 会删除 Hysteria2 内核、本项目目录、配置、数据库、systemd 服务和 `hy2` 命令；已安装的 BBR/fq 系统优化配置会保留。
 
 ## 维护
 

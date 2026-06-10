@@ -34,7 +34,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.1.15"
+APP_VERSION = "1.1.16"
 MAX_AUTH_BODY = 8192
 DB_TIMEOUT = 10
 DB_WRITE_LOCK = threading.Lock()
@@ -692,7 +692,7 @@ def install():
 
 def uninstall():
     require_root()
-    confirm = input("确认卸载 hy2-manager，并删除 Hysteria 配置、服务和数据库？[y/N]: ").strip().lower()
+    confirm = input("确认卸载 Hysteria2、hy2-manager，并删除配置、服务和数据库？[y/N]: ").strip().lower()
     if confirm != "y":
         print("已取消。")
         return
@@ -703,14 +703,17 @@ def uninstall():
         "/etc/systemd/system/hy2-monitor.service",
         "/etc/systemd/system/hy2-monitor.timer",
         "/usr/local/bin/hy2",
+        HYSTERIA_BIN,
     ):
         try:
             os.remove(path)
         except FileNotFoundError:
             pass
     run("systemctl daemon-reload", check=False)
-    run(f"rm -rf {ETC_DIR} {HYSTERIA_DIR}", check=False)
-    info("已删除管理器数据和 systemd 服务。Hysteria 内核保留在 /usr/local/bin/hysteria。")
+    run("systemctl reset-failed hysteria-server.service hy2-auth.service hy2-monitor.service hy2-monitor.timer", check=False)
+    run(f"rm -rf {ETC_DIR} {HYSTERIA_DIR} {APP_DIR}", check=False)
+    info("Hysteria2、hy2-manager、配置、数据库和 systemd 服务已卸载干净。")
+    tip("已安装的 BBR/fq 系统优化配置会保留。")
 
 
 def parse_mbps(value):
