@@ -34,7 +34,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.1.14"
+APP_VERSION = "1.1.15"
 MAX_AUTH_BODY = 8192
 DB_TIMEOUT = 10
 DB_WRITE_LOCK = threading.Lock()
@@ -371,7 +371,7 @@ def init_db():
             con.execute("ALTER TABLE users ADD COLUMN expire_at TEXT NOT NULL DEFAULT ''")
         defaults = {
             "api_secret": secrets.token_urlsafe(32),
-            "obfs_password": secrets.token_urlsafe(24),
+            "obfs_password": generate_obfs_password(),
             "public_host": public_host_default(),
             "client_sni": "www.bing.com",
             "backup_keep": "20",
@@ -767,6 +767,22 @@ def validate_password(password):
         raise SystemExit("密码不能为空，且不能包含空白字符。")
     if len(password) > 128:
         raise SystemExit("密码过长，请控制在 128 个字符以内。")
+    return password
+
+
+def generate_obfs_password():
+    return secrets.token_urlsafe(24)
+
+
+def validate_obfs_password(password):
+    if not password:
+        raise SystemExit("混淆密码不能为空。")
+    if len(password) < 8:
+        raise SystemExit("混淆密码不能少于 8 个字符。")
+    if len(password) > 128:
+        raise SystemExit("混淆密码不能超过 128 个字符。")
+    if not re.fullmatch(r"[A-Za-z0-9._~-]+", password):
+        raise SystemExit("混淆密码只能包含字母、数字、点、下划线、中横线和波浪线。")
     return password
 
 
@@ -1869,6 +1885,36 @@ def clear_auth_history():
     info("认证历史已清空。")
 
 
+def modify_obfs_password():
+    print()
+    print("修改混淆密码")
+    print("1. 随机生成")
+    print("2. 自定义输入")
+    print("0. 取消")
+    choice = input("请选择 [0-2]：").strip()
+    if choice == "1":
+        value = generate_obfs_password()
+        print_config_confirm("混淆密码", value)
+    elif choice == "2":
+        value = input("请输入新的混淆密码\n(8-128 位，仅支持字母、数字、._~-): ").strip()
+        value = validate_obfs_password(value)
+        print_config_confirm("混淆密码", value)
+    elif choice == "0" or not choice:
+        print("已取消。")
+        return
+    else:
+        print("请输入正确的数字 [0-2]")
+        return
+    confirm = input("修改后旧节点会全部失效，确认更新？[y/N]: ").strip().lower()
+    if confirm != "y":
+        print("已取消。")
+        return
+    set_setting("obfs_password", value)
+    write_hysteria_config()
+    restart_services()
+    print("混淆密码已更新，请重新查看并复制所有用户节点信息。")
+
+
 def settings_menu():
     print()
     print("当前设置")
@@ -1882,7 +1928,7 @@ def settings_menu():
         ("1", "修改公开地址"),
         ("2", "修改客户端 SNI"),
         ("3", "修改备份保留数量"),
-        ("4", "重新生成混淆密码"),
+        ("4", "修改混淆密码（随机/自定义）"),
     ], "0-4", return_label="返回上级菜单")
     if choice == "1":
         value = input("请输入公开地址/IP\n(默认: 取消): ").strip()
@@ -1906,14 +1952,7 @@ def settings_menu():
         else:
             print("请输入大于 0 的数字。")
     elif choice == "4":
-        confirm = input("会导致旧客户端配置失效，确认重新生成？[y/N]: ").strip().lower()
-        if confirm == "y":
-            set_setting("obfs_password", secrets.token_urlsafe(24))
-            write_hysteria_config()
-            restart_services()
-            print("混淆密码已更新，请重新导出所有客户端配置。")
-        else:
-            print("已取消。")
+        modify_obfs_password()
     elif choice == "0":
         print("已取消。")
     else:
