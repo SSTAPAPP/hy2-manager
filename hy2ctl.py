@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.2.8"
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
 MAX_AUTH_BODY = 8192
@@ -842,6 +842,14 @@ def clear_traffic_control(quiet=False):
         info("服务端平滑限速规则已清理。")
 
 
+def traffic_control_error_reason(exc):
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    for line in lines:
+        if not line.startswith("命令执行失败:"):
+            return line
+    return lines[0] if lines else "未知错误"
+
+
 def apply_traffic_control(quiet=False):
     require_root()
     require_traffic_control_tools()
@@ -869,13 +877,18 @@ def apply_traffic_control(quiet=False):
         info(f"服务端平滑限速已应用，网卡: {iface}，用户规则: {len(targets)}。")
 
 
-def refresh_traffic_control_if_enabled():
+def refresh_traffic_control_if_enabled(notify=False):
     if not traffic_control_enabled():
         return
     try:
         apply_traffic_control(quiet=True)
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         log(f"traffic control refresh failed: {type(e).__name__}: {e}")
+        set_setting("traffic_control_enabled", "0")
+        clear_traffic_control(quiet=True)
+        if notify:
+            tip("服务端平滑限速（实验）应用失败，已自动关闭；不影响 Hysteria2 配置同步。")
+            print(f"原因: {traffic_control_error_reason(e)}")
 
 
 def traffic_control_status():
@@ -912,7 +925,13 @@ def traffic_control_menu():
     if choice == "1":
         tip("实验功能依赖 tc/nftables 和默认出口网卡识别。启用前建议先运行健康检查。")
         set_setting("traffic_control_enabled", "1")
-        apply_traffic_control()
+        try:
+            apply_traffic_control()
+        except (Exception, SystemExit) as e:
+            set_setting("traffic_control_enabled", "0")
+            clear_traffic_control(quiet=True)
+            error("服务端平滑限速启用失败，已保持关闭。")
+            print(f"原因: {traffic_control_error_reason(e)}")
     elif choice == "2":
         set_setting("traffic_control_enabled", "0")
         clear_traffic_control()
@@ -920,7 +939,13 @@ def traffic_control_menu():
         if not traffic_control_enabled():
             print("服务端平滑限速未启用。")
             return
-        apply_traffic_control()
+        try:
+            apply_traffic_control()
+        except (Exception, SystemExit) as e:
+            set_setting("traffic_control_enabled", "0")
+            clear_traffic_control(quiet=True)
+            error("服务端平滑限速刷新失败，已自动关闭。")
+            print(f"原因: {traffic_control_error_reason(e)}")
     elif choice == "4":
         traffic_control_status()
     elif choice == "5":
@@ -965,7 +990,7 @@ def sync_config(restart=True):
         run("systemctl restart hy2-auth.service hysteria-server.service", check=False)
         run("systemctl restart hy2-monitor.timer", check=False)
         wait_services_ready()
-    refresh_traffic_control_if_enabled()
+    refresh_traffic_control_if_enabled(notify=True)
     info("配置、systemd 单元和服务状态已同步。")
 
 
