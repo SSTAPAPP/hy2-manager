@@ -2,7 +2,7 @@
 
 轻量化 Hysteria2 多用户一键管理脚本，终端交互参考经典 SSR 数字菜单。
 
-当前版本：`v1.3.1`
+当前版本：`v1.4.0`
 
 ## 一键部署
 
@@ -91,6 +91,7 @@ hy2 client-config 用户名     # 查看指定用户节点信息
 hy2 online                  # 查看在线连接和最近 IP
 hy2 auth-history            # 查看认证历史
 hy2 doctor                  # 健康检查
+hy2 self-test               # 脚本自检，不修改用户配置
 hy2 update-manager          # 更新管理脚本并同步配置
 hy2 sync-config             # 重写 Hysteria2 配置和 systemd 单元
 hy2 repair-install          # 修复安装并运行健康检查
@@ -106,6 +107,7 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 - Hysteria 配置：`/etc/hysteria/config.yaml`
 - 数据库备份：`/etc/hy2-manager/backups`
 - 管理入口：`/usr/local/bin/hy2`
+- 当前数据库 schema：`v1`
 
 ## 设计说明
 
@@ -126,7 +128,15 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 hy2 doctor
 ```
 
-健康检查会覆盖 root 权限、文件权限、systemd 状态、开机自启、UDP 443、认证后端、统计接口、SQLite 完整性、旧配置残留、BBR/fq、实验流控状态和磁盘使用率。
+健康检查会覆盖 root 权限、文件权限、systemd 状态、开机自启、UDP 443、认证后端、统计接口、SQLite 完整性、数据库 schema 版本、旧配置残留、BBR/fq、实验流控状态和磁盘使用率。
+
+脚本自检：
+
+```bash
+hy2 self-test
+```
+
+自检用于检查 Python 语法、数据库结构、schema 版本、命令入口表和关键权限，适合更新前后快速确认脚本自身是否完整。
 
 更新项目代码：
 

@@ -35,7 +35,8 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
+DB_SCHEMA_VERSION = 1
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
 MAX_AUTH_BODY = 8192
@@ -275,6 +276,38 @@ def input_choice(range_text="0-9"):
         return "0"
 
 
+def handle_menu_error(exc, main=False):
+    if isinstance(exc, KeyboardInterrupt):
+        print("\n已退出。" if main else "\n已返回上级菜单。")
+        return "return"
+    if isinstance(exc, SystemExit):
+        print(exc)
+        return "continue"
+    log(f"menu action failed: {type(exc).__name__}: {exc}")
+    print(f"错误: {exc}")
+    return "continue"
+
+
+def menu_loop(title, items, range_text, actions, return_label="返回上级菜单", main=False, before_render=None):
+    while True:
+        if before_render:
+            before_render()
+        choice = render_menu(title, items, range_text, return_label=return_label, main=main)
+        if choice == "0":
+            print("已退出。" if main else "已返回上级菜单。")
+            return
+        action = actions.get(choice)
+        if not action:
+            print(f"请输入正确的数字 [{range_text}]")
+            continue
+        try:
+            if action() == "exit":
+                return
+        except (KeyboardInterrupt, SystemExit, Exception) as e:
+            if handle_menu_error(e, main=main) == "return":
+                return
+
+
 def run_menu_action(func, pause_after=False):
     func()
 
@@ -400,6 +433,11 @@ def init_db():
         user_cols = {row["name"] for row in con.execute("PRAGMA table_info(users)").fetchall()}
         if "expire_at" not in user_cols:
             con.execute("ALTER TABLE users ADD COLUMN expire_at TEXT NOT NULL DEFAULT ''")
+        row = con.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
+        try:
+            schema_version = int(row["value"]) if row else 0
+        except (TypeError, ValueError):
+            schema_version = 0
         defaults = {
             "api_secret": secrets.token_urlsafe(32),
             "public_host": public_host_default(),
@@ -420,6 +458,13 @@ def init_db():
             ")"
         )
         con.execute("UPDATE users SET speed_up_bps=0 WHERE speed_up_bps!=0")
+        if schema_version > DB_SCHEMA_VERSION:
+            raise SystemExit(f"数据库 schema 版本过高: {schema_version}，当前脚本仅支持 {DB_SCHEMA_VERSION}。")
+        con.execute(
+            "INSERT INTO settings(key,value) VALUES('schema_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(DB_SCHEMA_VERSION),),
+        )
     os.chmod(DB_PATH, 0o600)
 
 
@@ -922,7 +967,7 @@ def traffic_control_status():
 
 
 def traffic_control_menu():
-    while True:
+    def show_summary():
         print()
         print("服务端平滑限速（实验）")
         hr("-")
@@ -930,50 +975,60 @@ def traffic_control_menu():
             ["功能状态", "启用" if traffic_control_enabled() else "禁用"],
             ["出口网卡", traffic_control_iface() or "未识别"],
         ], label_width=10)
-        choice = render_menu("服务端平滑限速（实验）", [
+
+    def enable_control():
+        tip("实验功能依赖系统内核、tc/nftables 和出口网卡；兼容性检查通过后才会启用。")
+        try:
+            check_traffic_control_ready()
+            apply_traffic_control()
+            set_setting("traffic_control_enabled", "1")
+            done("服务端平滑限速已启用。")
+        except (Exception, SystemExit) as e:
+            set_setting("traffic_control_enabled", "0")
+            clear_traffic_control(quiet=True)
+            error("服务端平滑限速启用失败，已保持关闭。")
+            print(f"原因: {traffic_control_error_reason(e)}")
+
+    def disable_control():
+        set_setting("traffic_control_enabled", "0")
+        clear_traffic_control()
+
+    def refresh_control():
+        if not traffic_control_enabled():
+            print("服务端平滑限速未启用。")
+            return
+        try:
+            apply_traffic_control()
+        except (Exception, SystemExit) as e:
+            set_setting("traffic_control_enabled", "0")
+            clear_traffic_control(quiet=True)
+            error("服务端平滑限速刷新失败，已自动关闭。")
+            print(f"原因: {traffic_control_error_reason(e)}")
+
+    def set_iface():
+        value = input("请输入出口网卡名，例如 eth0/ens3\n(默认: 自动识别): ").strip()
+        set_setting("traffic_control_iface", value)
+        print("出口网卡设置已更新。")
+
+    menu_loop(
+        "服务端平滑限速（实验）",
+        [
             ("1", "启用并应用规则"),
             ("2", "关闭并清理规则"),
             ("3", "立即刷新规则"),
             ("4", "查看流控状态"),
             ("5", "设置出口网卡"),
-        ], "0-5", return_label="返回上级菜单")
-        if choice == "1":
-            tip("实验功能依赖系统内核、tc/nftables 和出口网卡；兼容性检查通过后才会启用。")
-            try:
-                check_traffic_control_ready()
-                apply_traffic_control()
-                set_setting("traffic_control_enabled", "1")
-                done("服务端平滑限速已启用。")
-            except (Exception, SystemExit) as e:
-                set_setting("traffic_control_enabled", "0")
-                clear_traffic_control(quiet=True)
-                error("服务端平滑限速启用失败，已保持关闭。")
-                print(f"原因: {traffic_control_error_reason(e)}")
-        elif choice == "2":
-            set_setting("traffic_control_enabled", "0")
-            clear_traffic_control()
-        elif choice == "3":
-            if not traffic_control_enabled():
-                print("服务端平滑限速未启用。")
-                continue
-            try:
-                apply_traffic_control()
-            except (Exception, SystemExit) as e:
-                set_setting("traffic_control_enabled", "0")
-                clear_traffic_control(quiet=True)
-                error("服务端平滑限速刷新失败，已自动关闭。")
-                print(f"原因: {traffic_control_error_reason(e)}")
-        elif choice == "4":
-            traffic_control_status()
-        elif choice == "5":
-            value = input("请输入出口网卡名，例如 eth0/ens3\n(默认: 自动识别): ").strip()
-            set_setting("traffic_control_iface", value)
-            print("出口网卡设置已更新。")
-        elif choice == "0":
-            print("已返回上级菜单。")
-            return
-        else:
-            print("请输入正确的数字 [0-5]")
+        ],
+        "0-5",
+        {
+            "1": enable_control,
+            "2": disable_control,
+            "3": refresh_control,
+            "4": traffic_control_status,
+            "5": set_iface,
+        },
+        before_render=show_summary,
+    )
 
 
 def install():
@@ -2183,6 +2238,7 @@ def doctor():
         check("流控在线限速规则", True, f"{len(targets)} 个用户目标")
     else:
         check("服务端平滑限速（实验）", True, "未启用")
+    check("数据库 schema 版本", setting("schema_version", "0") == str(DB_SCHEMA_VERSION), f"v{setting('schema_version', '0')}")
     disk = run("df -P / | awk 'NR==2 {print $5}' | tr -d '%'", check=False, capture=True)
     check("磁盘使用率", disk.isdigit() and int(disk) < 90, f"已用 {disk}%", warn=True)
     with db() as con:
@@ -2339,7 +2395,7 @@ def clear_auth_history():
 
 
 def settings_menu():
-    while True:
+    def show_settings():
         print()
         print("当前设置")
         hr("-")
@@ -2348,81 +2404,82 @@ def settings_menu():
             ["客户端 SNI", setting("client_sni", "www.bing.com")],
             ["备份保留", setting("backup_keep", "20") + " 份"],
         ], label_width=10)
-        choice = render_menu("系统设置", [
+
+    def update_public_host():
+        value = input("请输入公开地址/IP\n(默认: 取消): ").strip()
+        if value:
+            set_setting("public_host", value)
+            print("公开地址已更新。")
+        else:
+            print("已取消。")
+
+    def update_client_sni():
+        value = input("请输入客户端 SNI\n(默认: 取消): ").strip()
+        if value:
+            set_setting("client_sni", value)
+            print("客户端 SNI 已更新。")
+        else:
+            print("已取消。")
+
+    def update_backup_keep():
+        value = input("请输入备份保留数量\n(默认: 20): ").strip() or "20"
+        if value.isdigit() and int(value) >= 1:
+            set_setting("backup_keep", value)
+            print("备份保留数量已更新。")
+        else:
+            print("请输入大于 0 的数字。")
+
+    menu_loop(
+        "系统设置",
+        [
             ("1", "修改公开地址"),
             ("2", "修改客户端 SNI"),
             ("3", "修改备份保留数量"),
-        ], "0-3", return_label="返回上级菜单")
-        if choice == "1":
-            value = input("请输入公开地址/IP\n(默认: 取消): ").strip()
-            if value:
-                set_setting("public_host", value)
-                print("公开地址已更新。")
-            else:
-                print("已取消。")
-        elif choice == "2":
-            value = input("请输入客户端 SNI\n(默认: 取消): ").strip()
-            if value:
-                set_setting("client_sni", value)
-                print("客户端 SNI 已更新。")
-            else:
-                print("已取消。")
-        elif choice == "3":
-            value = input("请输入备份保留数量\n(默认: 20): ").strip() or "20"
-            if value.isdigit() and int(value) >= 1:
-                set_setting("backup_keep", value)
-                print("备份保留数量已更新。")
-            else:
-                print("请输入大于 0 的数字。")
-        elif choice == "0":
-            print("已返回上级菜单。")
-            return
-        else:
-            print("请输入正确的数字 [0-3]")
+        ],
+        "0-3",
+        {
+            "1": update_public_host,
+            "2": update_client_sni,
+            "3": update_backup_keep,
+        },
+        before_render=show_settings,
+    )
 
 
 def maintenance_menu():
-    while True:
-        choice = render_menu("维护与修复", [
+    def show_paths():
+        print_kv_block([
+            ["脚本版本", f"v{APP_VERSION}"],
+            ["项目目录", APP_DIR],
+            ["配置目录", ETC_DIR],
+            ["数据库", DB_PATH],
+            ["Hysteria 配置", CONFIG_PATH],
+            ["管理命令", "/usr/local/bin/hy2"],
+            ["安装脚本", INSTALL_URL],
+        ], label_width=14)
+
+    menu_loop(
+        "维护与修复",
+        [
             ("1", "更新管理脚本并同步配置"),
             ("2", "仅同步 Hysteria2 配置"),
             ("3", "修复安装并健康检查"),
             ("4", "查看版本与路径"),
-        ], "0-4", return_label="返回上级菜单")
-        try:
-            if choice == "1":
-                update_manager_script()
-            elif choice == "2":
-                sync_config(restart=True)
-            elif choice == "3":
-                repair_installation()
-            elif choice == "4":
-                print_kv_block([
-                    ["脚本版本", f"v{APP_VERSION}"],
-                    ["项目目录", APP_DIR],
-                    ["配置目录", ETC_DIR],
-                    ["数据库", DB_PATH],
-                    ["Hysteria 配置", CONFIG_PATH],
-                    ["管理命令", "/usr/local/bin/hy2"],
-                    ["安装脚本", INSTALL_URL],
-                ], label_width=14)
-            elif choice == "0":
-                print("已返回上级菜单。")
-                return
-            else:
-                print("请输入正确的数字 [0-4]")
-        except KeyboardInterrupt:
-            print("\n已返回上级菜单。")
-            return
-        except SystemExit as e:
-            print(e)
-        except Exception as e:
-            print(f"错误: {e}")
+        ],
+        "0-4",
+        {
+            "1": update_manager_script,
+            "2": lambda: sync_config(restart=True),
+            "3": repair_installation,
+            "4": show_paths,
+        },
+    )
 
 
 def user_menu():
-    while True:
-        choice = render_menu("你要做什么？", [
+    menu_loop(
+        "你要做什么？",
+        [
             ("1", "添加 用户配置"),
             ("2", "删除 用户配置"),
             ("", ""),
@@ -2436,132 +2493,85 @@ def user_menu():
             ("", ""),
             ("10", "启用 / 禁用 用户"),
             ("12", "查看 用户节点信息"),
-        ], "0-12", return_label="返回上级菜单")
-        try:
-            if choice == "1":
-                add_user()
-            elif choice == "2":
-                delete_user()
-            elif choice == "3":
-                modify_user_password()
-            elif choice == "4":
-                modify_user_devices()
-            elif choice == "5":
-                modify_user_down_speed()
-            elif choice == "6":
-                modify_user_traffic_limit()
-            elif choice == "7":
-                modify_user_reset_cycle()
-            elif choice == "8":
-                modify_user_expire_at()
-            elif choice == "9":
-                edit_user()
-            elif choice == "10":
-                toggle_user()
-            elif choice == "12":
-                show_client_config()
-            elif choice == "0":
-                print("已返回上级菜单。")
-                return
-            else:
-                print("请输入正确的数字 [0-12]")
-        except KeyboardInterrupt:
-            print("\n已返回上级菜单。")
-            return
-        except Exception as e:
-            print(f"错误: {e}")
+        ],
+        "0-12",
+        {
+            "1": add_user,
+            "2": delete_user,
+            "3": modify_user_password,
+            "4": modify_user_devices,
+            "5": modify_user_down_speed,
+            "6": modify_user_traffic_limit,
+            "7": modify_user_reset_cycle,
+            "8": modify_user_expire_at,
+            "9": edit_user,
+            "10": toggle_user,
+            "12": show_client_config,
+        },
+    )
 
 
 def traffic_menu():
-    while True:
-        choice = render_menu("流量与连接", [
+    menu_loop(
+        "流量与连接",
+        [
             ("1", "显示在线 IP 和地理位置"),
             ("2", "查看认证历史"),
             ("3", "清零流量"),
             ("4", "清空认证历史"),
-        ], "0-4", return_label="返回上级菜单")
-        try:
-            if choice == "1":
-                show_online()
-            elif choice == "2":
-                show_auth_history()
-            elif choice == "3":
-                reset_traffic()
-            elif choice == "4":
-                clear_auth_history()
-            elif choice == "0":
-                print("已返回上级菜单。")
-                return
-            else:
-                print("请输入正确的数字 [0-4]")
-        except KeyboardInterrupt:
-            print("\n已返回上级菜单。")
-            return
-        except Exception as e:
-            print(f"错误: {e}")
+        ],
+        "0-4",
+        {
+            "1": show_online,
+            "2": show_auth_history,
+            "3": reset_traffic,
+            "4": clear_auth_history,
+        },
+    )
 
 
 def service_menu():
-    while True:
-        choice = render_menu("服务管理", [
+    menu_loop(
+        "服务管理",
+        [
             ("1", "启动服务"),
             ("2", "停止服务"),
             ("3", "重启服务"),
             ("4", "查看服务状态"),
             ("5", "健康检查"),
-        ], "0-5", return_label="返回上级菜单")
-        try:
-            if choice == "1":
-                start_services()
-            elif choice == "2":
-                stop_services()
-            elif choice == "3":
-                restart_services()
-            elif choice == "4":
-                status()
-            elif choice == "5":
-                doctor()
-            elif choice == "0":
-                print("已返回上级菜单。")
-                return
-            else:
-                print("请输入正确的数字 [0-5]")
-        except KeyboardInterrupt:
-            print("\n已返回上级菜单。")
-            return
-        except Exception as e:
-            print(f"错误: {e}")
+        ],
+        "0-5",
+        {
+            "1": start_services,
+            "2": stop_services,
+            "3": restart_services,
+            "4": status,
+            "5": doctor,
+        },
+    )
 
 
 def advanced_menu():
-    while True:
-        choice = render_menu("高级 / 实验功能", [
+    menu_loop(
+        "高级 / 实验功能",
+        [
             ("1", "查看服务日志"),
             ("2", "清空认证历史"),
             ("3", "服务端平滑限速（实验）"),
-        ], "0-3", return_label="返回上级菜单")
-        try:
-            if choice == "1":
-                show_logs()
-            elif choice == "2":
-                clear_auth_history()
-            elif choice == "3":
-                traffic_control_menu()
-            elif choice == "0":
-                print("已返回上级菜单。")
-                return
-            else:
-                print("请输入正确的数字 [0-3]")
-        except KeyboardInterrupt:
-            print("\n已返回上级菜单。")
-            return
-        except Exception as e:
-            print(f"错误: {e}")
+        ],
+        "0-3",
+        {
+            "1": show_logs,
+            "2": clear_auth_history,
+            "3": traffic_control_menu,
+        },
+    )
 
 
 def tools_menu():
-    while True:
-        choice = render_menu("系统工具", [
+    menu_loop(
+        "系统工具",
+        [
             ("1", "安装 / 启用 BBR"),
             ("2", "立即备份数据库"),
             ("3", "查看备份列表"),
@@ -2569,38 +2579,29 @@ def tools_menu():
             ("5", "系统设置"),
             ("6", "维护与修复"),
             ("7", "高级 / 实验功能"),
-        ], "0-7", return_label="返回上级菜单")
-        try:
-            if choice == "1":
-                install_bbr()
-            elif choice == "2":
-                backup_db("manual")
-            elif choice == "3":
-                list_backups()
-            elif choice == "4":
-                restore_backup()
-            elif choice == "5":
-                settings_menu()
-            elif choice == "6":
-                maintenance_menu()
-            elif choice == "7":
-                advanced_menu()
-            elif choice == "0":
-                print("已返回上级菜单。")
-                return
-            else:
-                print("请输入正确的数字 [0-7]")
-        except KeyboardInterrupt:
-            print("\n已返回上级菜单。")
-            return
-        except Exception as e:
-            print(f"错误: {e}")
+        ],
+        "0-7",
+        {
+            "1": install_bbr,
+            "2": lambda: backup_db("manual"),
+            "3": list_backups,
+            "4": restore_backup,
+            "5": settings_menu,
+            "6": maintenance_menu,
+            "7": advanced_menu,
+        },
+    )
 
 
 def menu():
     init_db()
-    while True:
-        choice = render_menu("Hysteria2 多用户一键管理脚本", [
+    def uninstall_and_exit():
+        uninstall()
+        return "exit"
+
+    menu_loop(
+        "Hysteria2 多用户一键管理脚本",
+        [
             ("1", "安装 Hysteria2"),
             ("2", "更新 Hysteria2 内核"),
             ("3", "卸载 Hysteria2"),
@@ -2617,55 +2618,89 @@ def menu():
             ("", ""),
             ("12", "其他功能"),
             ("13", "健康检查"),
-        ], "0-13", main=True)
-        try:
-            if choice == "1":
-                install()
-            elif choice == "2":
-                update_hysteria_core()
-            elif choice == "3":
-                uninstall()
-                return
-            elif choice == "4":
-                user_menu()
-            elif choice == "5":
-                show_online()
-            elif choice == "6":
-                show_auth_history()
-            elif choice == "7":
-                reset_traffic()
-            elif choice == "8":
-                start_services()
-            elif choice == "9":
-                stop_services()
-            elif choice == "10":
-                restart_services()
-            elif choice == "11":
-                status()
-            elif choice == "12":
-                tools_menu()
-            elif choice == "13":
-                doctor()
-            elif choice == "0":
-                print("已退出。")
-                return
-            else:
-                print("请输入正确的数字 [0-13]")
-        except KeyboardInterrupt:
-            print("\n已退出。")
-            return
-        except SystemExit as e:
-            print(e)
-        except Exception as e:
-            print(f"错误: {e}")
+        ],
+        "0-13",
+        {
+            "1": install,
+            "2": update_hysteria_core,
+            "3": uninstall_and_exit,
+            "4": user_menu,
+            "5": show_online,
+            "6": show_auth_history,
+            "7": reset_traffic,
+            "8": start_services,
+            "9": stop_services,
+            "10": restart_services,
+            "11": status,
+            "12": tools_menu,
+            "13": doctor,
+        },
+        return_label="退出",
+        main=True,
+    )
 
 
-def main():
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "menu"
-    if cmd == "client-config":
-        show_client_config(sys.argv[2] if len(sys.argv) > 2 else None, show_user_list=len(sys.argv) <= 2)
-        return
-    commands = {
+def self_test():
+    failures = 0
+
+    def check(name, ok, detail=""):
+        nonlocal failures
+        if ok:
+            print(f"[{c('通过', GREEN)}] {name}" + (f" - {detail}" if detail else ""))
+        else:
+            failures += 1
+            print(f"[{c('失败', RED)}] {name}" + (f" - {detail}" if detail else ""))
+
+    try:
+        import py_compile
+        py_compile.compile(__file__, cfile=os.devnull, doraise=True)
+        check("Python 语法", True, __file__)
+    except Exception as e:
+        check("Python 语法", False, str(e))
+
+    try:
+        init_db()
+        with db() as con:
+            integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+            tables = {row["name"] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            user_cols = {row["name"] for row in con.execute("PRAGMA table_info(users)").fetchall()}
+        required_tables = {"settings", "users", "auth_events"}
+        required_user_cols = {"username", "password", "enabled", "max_devices", "speed_down_bps", "traffic_limit_bytes", "traffic_used_bytes", "reset_cycle", "expire_at"}
+        check("SQLite 数据库完整性", integrity == "ok", integrity)
+        check("数据库表结构", required_tables.issubset(tables), ", ".join(sorted(tables)))
+        check("用户字段结构", required_user_cols.issubset(user_cols), f"{len(user_cols)} 个字段")
+        check("数据库 schema 版本", setting("schema_version", "0") == str(DB_SCHEMA_VERSION), f"v{setting('schema_version', '0')}")
+    except Exception as e:
+        check("数据库自检", False, str(e))
+
+    commands = command_registry()
+    required_commands = {
+        "menu", "user-menu", "tools-menu", "maintenance-menu", "advanced-menu",
+        "install", "sync-config", "repair-install", "update-manager",
+        "doctor", "self-test", "auth-server", "monitor",
+    }
+    check("命令入口表", required_commands.issubset(commands.keys()), f"{len(commands)} 个命令")
+    check("命令入口可调用", all(callable(func) for func in commands.values()))
+    check("项目目录路径", bool(APP_DIR and ETC_DIR and DB_PATH), f"{APP_DIR} / {ETC_DIR}")
+
+    if os.path.exists(ETC_DIR):
+        mode = oct(os.stat(ETC_DIR).st_mode & 0o777)
+        check("配置目录权限", mode == "0o700", mode)
+    else:
+        check("配置目录权限", True, "尚未初始化")
+    if os.path.exists(DB_PATH):
+        mode = oct(os.stat(DB_PATH).st_mode & 0o777)
+        check("数据库文件权限", mode == "0o600", mode)
+    else:
+        check("数据库文件权限", True, "尚未初始化")
+
+    if failures:
+        raise SystemExit(f"自检完成：{failures} 个失败。")
+    print("自检完成：0 个失败。")
+
+
+def command_registry():
+    return {
         "menu": menu,
         "user-menu": user_menu,
         "traffic-menu": traffic_menu,
@@ -2695,6 +2730,7 @@ def main():
         "logs": show_logs,
         "bbr": install_bbr,
         "doctor": doctor,
+        "self-test": self_test,
         "start": start_services,
         "stop": stop_services,
         "status": status,
@@ -2703,6 +2739,14 @@ def main():
         "auth-server": auth_server,
         "monitor": monitor,
     }
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "menu"
+    if cmd == "client-config":
+        show_client_config(sys.argv[2] if len(sys.argv) > 2 else None, show_user_list=len(sys.argv) <= 2)
+        return
+    commands = command_registry()
     if cmd not in commands:
         print("可用命令: " + ", ".join(sorted(commands)))
         raise SystemExit(2)
