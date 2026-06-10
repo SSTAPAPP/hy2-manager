@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 MAX_AUTH_BODY = 8192
 DB_TIMEOUT = 10
 DB_WRITE_LOCK = threading.Lock()
@@ -1242,8 +1242,9 @@ def client_config_text(row):
 def client_uri(row):
     host = setting("public_host", public_host_default())
     sni = setting("client_sni", "www.bing.com")
-    auth = urllib.parse.quote(f"{row['username']}:{row['password']}", safe="")
+    auth = urllib.parse.quote(f"{row['username']}:{row['password']}", safe=":")
     params = {
+        "peer": sni,
         "insecure": "1",
         "sni": sni,
     }
