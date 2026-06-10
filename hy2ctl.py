@@ -35,7 +35,7 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 DB_SCHEMA_VERSION = 1
 INSTALL_URL = "https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh"
 REPO_URL = "https://github.com/SSTAPAPP/hy2-manager.git"
@@ -1138,10 +1138,10 @@ def update_manager_script():
 
     def validate_update_tree(path):
         q_path = shlex.quote(path)
-        run(f"python3 -m py_compile {q_path}/hy2ctl.py")
-        run(f"sh -n {q_path}/install.sh")
+        run(f"python3 -m py_compile {q_path}/hy2ctl.py", capture=True)
+        run(f"sh -n {q_path}/install.sh", capture=True)
         if shutil.which("bash"):
-            run(f"bash -n {q_path}/hy2.sh")
+            run(f"bash -n {q_path}/hy2.sh", capture=True)
         run(f"HY2_SELF_TEST_READONLY=1 python3 {q_path}/hy2ctl.py self-test", capture=True)
 
     def restore_backup():
