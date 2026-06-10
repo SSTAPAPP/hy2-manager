@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
 APP_DIR="/opt/hy2-manager"
 BIN_PATH="/usr/local/bin/hy2"
@@ -24,13 +24,19 @@ install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y ca-certificates curl git python3 openssl iproute2 procps
+    apt-get install -y ca-certificates curl git python3 openssl iproute2 procps nftables
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y ca-certificates curl git python3 openssl iproute procps-ng
+    dnf install -y ca-certificates curl git python3 openssl iproute procps-ng nftables
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y ca-certificates curl git python3 openssl iproute procps-ng
+    yum install -y ca-certificates curl git python3 openssl iproute procps-ng nftables
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache ca-certificates curl git python3 openssl iproute2 procps nftables
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install ca-certificates curl git python3 openssl iproute2 procps nftables
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm ca-certificates curl git python openssl iproute2 procps-ng nftables
   else
-    echo "未识别的包管理器，请先安装 curl、git、python3、openssl、iproute2。"
+    echo "未识别的包管理器，请先安装 curl、git、python3、openssl、iproute2、nftables。"
     exit 1
   fi
 }

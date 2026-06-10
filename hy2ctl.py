@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -34,13 +35,16 @@ AUTH_HOST = "127.0.0.1"
 AUTH_PORT = 28787
 STATS_HOST = "127.0.0.1"
 STATS_PORT = 28788
-APP_VERSION = "1.1.18"
+APP_VERSION = "1.2.0"
 MAX_AUTH_BODY = 8192
 DB_TIMEOUT = 10
 DB_WRITE_LOCK = threading.Lock()
 DEVICE_AUTH_WINDOW_SECONDS = 60
 AUTH_DEVICE_LOCK = threading.Lock()
 AUTH_DEVICE_CACHE = {}
+TC_TABLE = "hy2_manager"
+TC_DEFAULT_CLASS = "999"
+TC_MARK_BASE = 0x1200
 ALLOWED_UPDATE_FIELDS = {
     "password",
     "max_devices",
@@ -303,9 +307,28 @@ def run(cmd, check=True, capture=False):
     return (result.stdout or "").strip()
 
 
+def run_input(argv, data, check=True):
+    result = subprocess.run(
+        argv,
+        input=data,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if check and result.returncode != 0:
+        output = (result.stdout or "").strip()
+        raise SystemExit(f"命令执行失败: {' '.join(argv)}\n{output}")
+    return (result.stdout or "").strip()
+
+
 def require_root():
     if os.geteuid() != 0:
         raise SystemExit("请使用 root 权限运行。")
+
+
+def require_systemd():
+    if not shutil.which("systemctl") or not os.path.isdir("/run/systemd/system"):
+        raise SystemExit("当前系统未运行 systemd，暂不支持一键安装系统服务。")
 
 
 def ensure_dirs():
@@ -376,6 +399,8 @@ def init_db():
             "client_sni": "www.bing.com",
             "backup_keep": "20",
             "last_auto_backup_date": "",
+            "traffic_control_enabled": "0",
+            "traffic_control_iface": "",
         }
         for key, value in defaults.items():
             con.execute(
@@ -675,8 +700,243 @@ def open_firewall():
         run("iptables -C INPUT -p udp --dport 443 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 443 -j ACCEPT", check=False)
 
 
+def default_iface():
+    iface = run(
+        "ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}'",
+        check=False,
+        capture=True,
+    ).strip()
+    if iface:
+        return iface
+    return run(
+        "ip -o -4 route get 1.1.1.1 2>/dev/null | "
+        "awk '{for(i=1;i<=NF;i++) if($i==\"dev\") {print $(i+1); exit}}'",
+        check=False,
+        capture=True,
+    ).strip()
+
+
+def traffic_control_iface():
+    return setting("traffic_control_iface", "").strip() or default_iface()
+
+
+def traffic_control_enabled():
+    return setting("traffic_control_enabled", "0") == "1"
+
+
+def require_traffic_control_tools():
+    missing = [name for name in ("tc", "nft", "ip") if not shutil.which(name)]
+    if missing:
+        raise SystemExit("缺少流控依赖: " + ", ".join(missing) + "，请安装 iproute2 和 nftables。")
+
+
+def class_rate_mbit(bps):
+    return max(0.1, int(bps or 0) * 8 / 1000 / 1000)
+
+
+def parse_addr_port(addr):
+    addr = str(addr or "").strip()
+    if not addr:
+        return "", 0
+    if addr.startswith("[") and "]" in addr:
+        host, _, tail = addr[1:].partition("]")
+        if tail.startswith(":") and tail[1:].isdigit():
+            return host, int(tail[1:])
+        return host, 0
+    if ":" not in addr:
+        return addr, 0
+    host, port = addr.rsplit(":", 1)
+    return host, int(port) if port.isdigit() else 0
+
+
+def traffic_control_targets():
+    online = stats_get("/online") or {}
+    if not isinstance(online, dict):
+        online = {}
+    targets = []
+    with db() as con:
+        users = con.execute(
+            "SELECT username,speed_down_bps FROM users "
+            "WHERE enabled=1 AND speed_down_bps>0 ORDER BY username"
+        ).fetchall()
+        for index, user in enumerate(users, 1):
+            username = user["username"]
+            if online and int(online.get(username, 0)) <= 0:
+                continue
+            rows = con.execute(
+                """
+                SELECT addr, max(created_at) AS seen_at
+                FROM auth_events
+                WHERE username=? AND ok=1 AND addr!=''
+                GROUP BY addr
+                ORDER BY seen_at DESC
+                LIMIT 50
+                """,
+                (username,),
+            ).fetchall()
+            endpoints = []
+            for row in rows:
+                ip, port = parse_addr_port(row["addr"])
+                if not ip or not port:
+                    continue
+                try:
+                    parsed = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if parsed.is_global:
+                    endpoints.append((parsed.version, ip, port))
+            if endpoints:
+                classid = 1000 + index
+                mark = TC_MARK_BASE + index
+                targets.append({
+                    "username": username,
+                    "rate_mbit": class_rate_mbit(user["speed_down_bps"]),
+                    "classid": classid,
+                    "mark": mark,
+                    "endpoints": endpoints,
+                })
+    return targets
+
+
+def nft_script_for_targets(targets):
+    elements4 = []
+    elements6 = []
+    for target in targets:
+        mark = f"0x{target['mark']:x}"
+        for version, ip, port in target["endpoints"]:
+            item = f"{ip} . {port} : {mark} timeout 10m"
+            if version == 6:
+                elements6.append(item)
+            else:
+                elements4.append(item)
+    element4_text = ""
+    element6_text = ""
+    if elements4:
+        element4_text = "elements = { " + ", ".join(elements4) + " }"
+    if elements6:
+        element6_text = "elements = { " + ", ".join(elements6) + " }"
+    return f"""table inet {TC_TABLE} {{
+  map marks4 {{
+    type ipv4_addr . inet_service : mark;
+    flags timeout;
+    {element4_text + ';' if element4_text else ''}
+  }}
+  map marks6 {{
+    type ipv6_addr . inet_service : mark;
+    flags timeout;
+    {element6_text + ';' if element6_text else ''}
+  }}
+  chain output {{
+    type route hook output priority mangle; policy accept;
+    udp sport 443 meta mark set ip daddr . udp dport map @marks4;
+    udp sport 443 meta mark set ip6 daddr . udp dport map @marks6;
+  }}
+}}
+"""
+
+
+def clear_traffic_control(quiet=False):
+    iface = traffic_control_iface()
+    if iface:
+        run(f"tc qdisc del dev {shlex.quote(iface)} root", check=False)
+    run(f"nft delete table inet {TC_TABLE}", check=False)
+    if not quiet:
+        info("服务端平滑限速规则已清理。")
+
+
+def apply_traffic_control(quiet=False):
+    require_root()
+    require_traffic_control_tools()
+    iface = traffic_control_iface()
+    if not iface:
+        raise SystemExit("未能识别默认出口网卡，请在流控设置中手动指定。")
+    targets = traffic_control_targets()
+    qiface = shlex.quote(iface)
+    run(f"tc qdisc replace dev {qiface} root handle 1: htb default {TC_DEFAULT_CLASS}")
+    run(
+        f"tc class replace dev {qiface} parent 1: classid 1:{TC_DEFAULT_CLASS} "
+        "htb rate 10000mbit ceil 10000mbit",
+        check=False,
+    )
+    for prio, target in enumerate(targets, 1):
+        rate = f"{target['rate_mbit']:.3f}mbit"
+        classid = target["classid"]
+        mark = target["mark"]
+        run(f"tc class replace dev {qiface} parent 1: classid 1:{classid} htb rate {rate} ceil {rate}")
+        run(f"tc filter replace dev {qiface} parent 1: protocol ip prio {prio} handle {mark} fw flowid 1:{classid}")
+        run(f"tc filter replace dev {qiface} parent 1: protocol ipv6 prio {prio} handle {mark} fw flowid 1:{classid}", check=False)
+    run(f"nft delete table inet {TC_TABLE}", check=False)
+    run_input(["nft", "-f", "-"], nft_script_for_targets(targets))
+    if not quiet:
+        info(f"服务端平滑限速已应用，网卡: {iface}，用户规则: {len(targets)}。")
+
+
+def refresh_traffic_control_if_enabled():
+    if not traffic_control_enabled():
+        return
+    try:
+        apply_traffic_control(quiet=True)
+    except Exception as e:
+        log(f"traffic control refresh failed: {type(e).__name__}: {e}")
+
+
+def traffic_control_status():
+    iface = traffic_control_iface()
+    rows = [
+        ["功能状态", "启用" if traffic_control_enabled() else "禁用"],
+        ["出口网卡", iface or "未识别"],
+        ["tc 命令", "可用" if shutil.which("tc") else "缺失"],
+        ["nft 命令", "可用" if shutil.which("nft") else "缺失"],
+    ]
+    print_table(["项目", "状态"], rows)
+    if iface:
+        print()
+        print(run(f"tc -s qdisc show dev {shlex.quote(iface)} 2>/dev/null", check=False, capture=True) or "暂无 tc qdisc。")
+    print()
+    print(run(f"nft list table inet {TC_TABLE} 2>/dev/null", check=False, capture=True) or "暂无 nft 规则。")
+
+
+def traffic_control_menu():
+    print()
+    print("服务端平滑限速")
+    hr("-")
+    print_kv_block([
+        ["功能状态", "启用" if traffic_control_enabled() else "禁用"],
+        ["出口网卡", traffic_control_iface() or "未识别"],
+    ], label_width=10)
+    choice = render_menu("服务端平滑限速", [
+        ("1", "启用并应用规则"),
+        ("2", "关闭并清理规则"),
+        ("3", "立即刷新规则"),
+        ("4", "查看流控状态"),
+        ("5", "设置出口网卡"),
+    ], "0-5", return_label="返回上级菜单")
+    if choice == "1":
+        set_setting("traffic_control_enabled", "1")
+        apply_traffic_control()
+    elif choice == "2":
+        set_setting("traffic_control_enabled", "0")
+        clear_traffic_control()
+    elif choice == "3":
+        if not traffic_control_enabled():
+            print("服务端平滑限速未启用。")
+            return
+        apply_traffic_control()
+    elif choice == "4":
+        traffic_control_status()
+    elif choice == "5":
+        value = input("请输入出口网卡名，例如 eth0/ens3\n(默认: 自动识别): ").strip()
+        set_setting("traffic_control_iface", value)
+        print("出口网卡设置已更新。")
+    elif choice == "0":
+        print("已取消。")
+    else:
+        print("请输入正确的数字 [0-5]")
+
+
 def install():
     require_root()
+    require_systemd()
     ensure_dirs()
     init_db()
     if not shutil.which("curl"):
@@ -697,6 +957,7 @@ def uninstall():
         print("已取消。")
         return
     run("systemctl disable --now hysteria-server.service hy2-auth.service hy2-monitor.timer hy2-monitor.service", check=False)
+    clear_traffic_control(quiet=True)
     for path in (
         "/etc/systemd/system/hysteria-server.service",
         "/etc/systemd/system/hy2-auth.service",
@@ -1097,6 +1358,7 @@ def edit_user():
             ),
         )
     info("用户已更新。")
+    refresh_traffic_control_if_enabled()
 
 
 def update_user_field(username, field, value, label):
@@ -1105,6 +1367,8 @@ def update_user_field(username, field, value, label):
     with db() as con:
         con.execute(f"UPDATE users SET {field}=?, updated_at=? WHERE username=?", (value, now_iso(), username))
     info(f"用户 {label} 修改成功 [用户名: {username}]")
+    if field == "speed_down_bps":
+        refresh_traffic_control_if_enabled()
 
 
 def modify_user_password():
@@ -1416,6 +1680,7 @@ def monitor():
             "(SELECT id FROM auth_events ORDER BY id DESC LIMIT 10000)"
         )
     kick_users(sorted(set(to_kick)))
+    refresh_traffic_control_if_enabled()
 
 
 class AuthHandler(http.server.BaseHTTPRequestHandler):
@@ -1733,6 +1998,12 @@ def doctor():
     check("统计接口响应", stats_ok)
     bbr = run("sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc 2>/dev/null", check=False, capture=True)
     check("BBR/fq 已启用", "tcp_congestion_control = bbr" in bbr and "default_qdisc = fq" in bbr, "bbr/fq", warn=True)
+    if traffic_control_enabled():
+        check("流控依赖 tc", shutil.which("tc") is not None, "tc")
+        check("流控依赖 nft", shutil.which("nft") is not None, "nft")
+        check("流控出口网卡", bool(traffic_control_iface()), traffic_control_iface() or "未识别")
+    else:
+        check("服务端平滑限速", True, "未启用")
     disk = run("df -P / | awk 'NR==2 {print $5}' | tr -d '%'", check=False, capture=True)
     check("磁盘使用率", disk.isdigit() and int(disk) < 90, f"已用 {disk}%", warn=True)
     with db() as con:
@@ -2075,7 +2346,8 @@ def tools_menu():
         ("5", "系统设置"),
         ("6", "查看服务日志"),
         ("7", "清空认证历史"),
-    ], "0-7", return_label="返回上级菜单")
+        ("8", "服务端平滑限速"),
+    ], "0-8", return_label="返回上级菜单")
     try:
         if choice == "1":
             install_bbr()
@@ -2091,10 +2363,12 @@ def tools_menu():
             show_logs()
         elif choice == "7":
             clear_auth_history()
+        elif choice == "8":
+            traffic_control_menu()
         elif choice == "0":
             print("已取消。")
         else:
-            print("请输入正确的数字 [0-7]")
+            print("请输入正确的数字 [0-8]")
     except KeyboardInterrupt:
         print("\n已取消。")
     except Exception as e:
@@ -2184,6 +2458,7 @@ def main():
         "list-backups": list_backups,
         "restore-backup": restore_backup,
         "settings": settings_menu,
+        "traffic-control": traffic_control_menu,
         "logs": show_logs,
         "bbr": install_bbr,
         "doctor": doctor,

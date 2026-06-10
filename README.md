@@ -2,7 +2,7 @@
 
 轻量化 Hysteria2 多用户一键管理脚本，终端交互参考经典 SSR 数字菜单。
 
-当前版本：`v1.1.18`
+当前版本：`v1.2.0`
 
 ## 一键部署
 
@@ -28,6 +28,8 @@ hy2
 ```bash
 HY2_NO_MENU=1 bash <(curl -fsSL https://raw.githubusercontent.com/SSTAPAPP/hy2-manager/main/install.sh)
 ```
+
+安装器会自动安装基础依赖，已适配常见最新版系统的包管理器：`apt`、`dnf`、`yum`、`apk`、`zypper`、`pacman`。核心服务依赖 systemd；非 systemd 系统可以安装管理脚本，但不能一键注册系统服务。
 
 ## 主菜单
 
@@ -75,6 +77,7 @@ HY2_NO_MENU=1 bash <(curl -fsSL https://raw.githubusercontent.com/SSTAPAPP/hy2-m
 - 启动、停止、重启服务
 - 查看服务状态和日志
 - 安装 / 启用 BBR
+- 可选启用服务端平滑限速（tc HTB + nftables）
 - 数据库备份与恢复
 - 健康检查
 
@@ -103,6 +106,7 @@ hy2 restart                 # 重启 hy2-auth / hysteria / monitor
 - 没有自有域名时使用自签证书，客户端 URI 会启用 `insecure=1`，默认 SNI 为 `www.bing.com`。
 - `salamander` 混淆密码安装时默认随机生成，也可以在系统设置中改为自定义值；修改后旧节点会全部失效，需要重新复制节点信息。
 - 下载限速写入用户节点 URI 的 `downmbps` 参数，用于客户端侧平滑限速；不按设备数平均切分，避免多设备体验被切碎。
+- 可选启用服务端平滑限速：使用 `tc HTB` 做平滑队列，使用 `nftables` 根据认证记录中的客户端 IPv4/IPv6 + 端口标记回程 UDP 包，并映射到对应用户的下载限速 class。该能力默认关闭，适合需要服务端兜底控速的场景。
 - 上传固定为无限制，不提供新增或修改入口。
 - 服务端负责用户启用状态、设备数、总流量、到期时间、流量清零和在线统计。
 - 在线 IP 使用中文地理位置展示；国内显示省 / 市 / 区县和网络类型，海外统一显示未知。
